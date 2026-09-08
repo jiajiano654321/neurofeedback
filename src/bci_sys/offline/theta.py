@@ -14,8 +14,9 @@ def filter_whole(x: np.ndarray, sfreq: float = config.SFREQ) -> np.ndarray:
     """全程 1-30Hz 零相位 FIR 带通。必须在切 epoch 之前对整段信号调用。"""
     import mne
 
+    lo, hi = config.FILTER_BAND_HZ
     return mne.filter.filter_data(
-        x.astype(np.float64), sfreq, 1.0, 30.0, method="fir", verbose="ERROR"
+        x.astype(np.float64), sfreq, lo, hi, method="fir", verbose="ERROR"
     )
 
 

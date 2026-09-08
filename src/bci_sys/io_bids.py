@@ -86,8 +86,9 @@ def check_fz_unit_std(fz_uV: np.ndarray, sfreq: float = config.SFREQ) -> None:
     import mne
 
     lo, hi = config.UNIT_STD_RANGE_UV
+    fb_lo, fb_hi = config.FILTER_BAND_HZ
     filt = mne.filter.filter_data(
-        fz_uV.astype(np.float64), sfreq, 1.0, 30.0, method="fir", verbose="ERROR"
+        fz_uV.astype(np.float64), sfreq, fb_lo, fb_hi, method="fir", verbose="ERROR"
     )
     std = float(np.std(filt))
     if not (lo < std < hi):

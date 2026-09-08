@@ -14,6 +14,7 @@ SEGMENT_SAMPLES = 50  # 250 Hz × 0.2 s
 THETA_BAND_HZ = (4.0, 8.0)
 EPOCH_SEC = 1.5
 MULTITAPER_NW = 2.0
+FILTER_BAND_HZ = (1.0, 30.0)  # 全程零相位带通（离线 theta 管线 + preflight 单位诊断共用）
 
 # --- 被试名单 ---
 RECOMMENDED_SUBS = ["001", "002", "006", "014", "015", "018", "019"]
