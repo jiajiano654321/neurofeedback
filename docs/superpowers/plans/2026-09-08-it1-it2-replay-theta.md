@@ -14,7 +14,7 @@
 - mne 读出的数值**直接就是 µV，严禁乘 1e6**；信号带 ~1.44e6 直流偏移，滤波后 std 应在 5–300 µV。
 - 1–30 Hz FIR 长 825 点（3.3 s）> epoch 375 点（1.5 s）：**必须先全程滤波再切 epoch**。
 - 非练习试次 400 个（1/2/3/4-back 各 100），过滤条件 `istutorial != True 且 nback_level ∈ {1,2,3,4}`（pandas 把 "true" 解析为 True、"n/a" 解析为 NaN）。
-- 全量 958.508 s → 4792 个整段 + 0.108 s 尾巴。
+- 全量 **239628 点 = 958.512 s**（eeg.json 的 958.508 s 是四舍五入值，**不可反推点数**）→ 4792 个整段 + 余 28 点 = **0.112 s** 尾巴。
 
 ---
 
@@ -606,7 +606,8 @@ def test_sub001_full_run_is_4792_segments(data_root):
     )
     assert len(segs) == 4792
     assert all(s.samples.size == 50 for s in segs)
-    assert abs(segments.tail_seconds(fz.size) - 0.108) < 0.01
+    # 真实尾巴 = 28 点 / 250 = 0.112 s（239628 点；json 的 958.508s 是四舍五入，不能反推）
+    assert abs(segments.tail_seconds(fz.size) - 0.112) < 0.005
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -683,7 +684,7 @@ Expected: 6 passed。
 
 ```bash
 git add src/bci_sys/replay/segments.py tests/test_segments.py
-git commit -m "feat: 因果分段器 + 事件左闭右开对齐（4792 段/0.108s 尾）"
+git commit -m "feat: 因果分段器 + 事件左闭右开对齐（4792 段/0.112s 尾）"
 ```
 
 ---
@@ -1482,7 +1483,10 @@ def theta_power_uV2(
 
     epochs = np.atleast_2d(epochs)
     t_epoch = epochs.shape[1] / sfreq
-    bandwidth = nw / t_epoch  # NW = bandwidth * T
+    # mne 没有 NW 参数，要的是 bandwidth（全带宽，Hz）。
+    # mne 内部：half_nbw(NW) = bandwidth * n_times / (2*sfreq) = bandwidth*T/2
+    # → bandwidth = 2*NW/T。NW=2、T=1.5s → bandwidth = 2.667 Hz（不是 NW/T=1.333）。
+    bandwidth = 2.0 * nw / t_epoch
     psd, freqs = psd_array_multitaper(
         epochs, sfreq, fmin=band[0], fmax=band[1],
         bandwidth=bandwidth, normalization="full", verbose="ERROR",
@@ -1841,7 +1845,7 @@ Expected: 推送到 https://github.com/jiajiano654321/neurofeedback 的 main。
 | C1 direction 必填无默认 | Task 2 |
 | 单位陷阱：不乘 1e6 + preflight std 硬门 | Task 3（docstring）、Task 4（硬检查） |
 | 通道按名查找 | Task 3 |
-| 因果分段、4792 段、0.108s 尾、段边界截断 | Task 5 |
+| 因果分段、4792 段、0.112s 尾（28 点）、段边界截断 | Task 5 |
 | 1x 节拍、速率颜色 | Task 6 |
 | D2 代码版本 | Task 7 |
 | JSONL schema（meta/seg/event/summary）、事件左闭右开 | Task 8、Task 5 |
