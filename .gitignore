@@ -1,0 +1,19 @@
+# 数据（955MB，不入库；D1：原始数据只读，不复制不修改）
+ds007169/
+
+# 运行产物（每次运行生成，可重算）
+outputs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
