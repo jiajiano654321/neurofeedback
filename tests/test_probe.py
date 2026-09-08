@@ -12,6 +12,10 @@ def test_gate_fails_flat_and_nonmonotonic():
     assert probe.gate_passes({1: 1.0, 2: 3.0, 3: 2.0, 4: 4.0}) is False
 
 
+def test_gate_fails_when_load_missing():
+    assert probe.gate_passes({1: 1.0, 2: 2.0, 3: 3.0}) is False  # 缺 4-back
+
+
 def test_median_by_load():
     df = pd.DataFrame({"load": [1, 1, 2, 2], "theta_uV2": [1.0, 3.0, 10.0, 20.0]})
     med = probe.median_by_load(df)

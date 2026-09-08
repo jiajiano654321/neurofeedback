@@ -19,8 +19,10 @@ def median_by_load(df: pd.DataFrame) -> dict[int, float]:
 
 
 def gate_passes(medians: dict[int, float]) -> bool:
-    """硬门控：median(L1) < L2 < L3 < L4 严格成立。"""
-    vals = [medians[i] for i in (1, 2, 3, 4)]
+    """硬门控：median(L1) < L2 < L3 < L4 严格成立。任一档位缺失 → False（无法确认单调）。"""
+    vals = [medians.get(i) for i in (1, 2, 3, 4)]
+    if any(v is None for v in vals):
+        return False
     return all(vals[i] < vals[i + 1] for i in range(3))
 
 
