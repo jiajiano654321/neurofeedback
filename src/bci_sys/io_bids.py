@@ -75,3 +75,59 @@ def real_trial_events(events: pd.DataFrame) -> pd.DataFrame:
     ].copy()
     tr["nback_level"] = tr["nback_level"].astype(int)
     return tr.sort_values("onset").reset_index(drop=True)
+
+
+def check_fz_unit_std(fz_uV: np.ndarray, sfreq: float = config.SFREQ) -> None:
+    """单位硬检查：1-30Hz 带通后 Fz std 必须落在正常 EEG 范围。
+
+    这是唯一能挡住『误乘 1e6 / 单位搞错』这类不报错错误的闸门。
+    注意：此处带通仅为启动诊断，不属于实时/离线信号处理管线。
+    """
+    import mne
+
+    lo, hi = config.UNIT_STD_RANGE_UV
+    filt = mne.filter.filter_data(
+        fz_uV.astype(np.float64), sfreq, 1.0, 30.0, method="fir", verbose="ERROR"
+    )
+    std = float(np.std(filt))
+    if not (lo < std < hi):
+        raise ValueError(
+            f"Fz 带通后 std={std:.1f} µV，超出正常 EEG 范围 {lo}-{hi} µV。"
+            f"极可能是单位换算错误（检查是否误乘 1e6，或 mne 输出被错误换算）。"
+        )
+
+
+def preflight(subj: str, root: Path | str | None = None) -> None:
+    """S1 质检（回放期简化版）。任一不过：抛异常（硬停，C7），不写任何文件。"""
+    # 1. 文件可读
+    raw = load_raw(subj, root)
+    ev_path = events_path(subj, root)
+    if not ev_path.exists():
+        raise FileNotFoundError(f"events.tsv 缺失：{ev_path}")
+
+    # 2. 采样率
+    sfreq = float(raw.info["sfreq"])
+    if abs(sfreq - config.SFREQ) > 1e-6:
+        raise ValueError(f"采样率 {sfreq} != 设计值 {config.SFREQ}")
+
+    # 3. 通道：mne 侧 Fz 存在（不存在即抛 KeyError）；EEG 通道数以 channels.tsv 为准
+    #    （mne 读 vhdr 可能把 24 导全标成 eeg，不能信它的类型计数）
+    idx = channel_index(raw, config.TARGET.channel)
+    ch_tsv = _eeg_dir(subj, root) / f"sub-{subj}_task-nback_channels.tsv"
+    if not ch_tsv.exists():
+        raise FileNotFoundError(f"channels.tsv 缺失：{ch_tsv}")
+    chans = pd.read_csv(ch_tsv, sep="\t")
+    n_eeg = int((chans["type"] == "EEG").sum())
+    if n_eeg != 19:
+        raise ValueError(f"channels.tsv 中 EEG 通道数 {n_eeg} != 19")
+    if config.TARGET.channel not in set(chans["name"]):
+        raise KeyError(f"channels.tsv 中无通道 {config.TARGET.channel}")
+
+    # 4. events 含 nback_level 列
+    ev = pd.read_csv(ev_path, sep="\t", nrows=1)
+    if "nback_level" not in ev.columns:
+        raise ValueError("events.tsv 缺少 nback_level 列")
+
+    # 5. 单位硬检查
+    fz = raw.get_data()[idx]
+    check_fz_unit_std(fz, sfreq)
