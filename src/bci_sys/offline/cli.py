@@ -25,18 +25,21 @@ def main(argv=None) -> int:
     if not args.subj and not args.all:
         ap.error("必须指定 --subj 或 --all")
 
-    try:
-        if args.all:
-            rows = probe.run_all(root=args.data_root, out_dir=args.out_dir)
-            for r in rows:
+    if args.all:
+        rows = probe.run_all(root=args.data_root, out_dir=args.out_dir)
+        for r in rows:
+            if r["status"] == "ok":
                 med = f"{r['m1']:.1f} < {r['m2']:.1f} < {r['m3']:.1f} < {r['m4']:.1f}"
                 if r["pass"]:
                     print(f"sub-{r['subj']}: PASS ({med})")
                 else:
                     print(f"sub-{r['subj']}: FAIL ({med})")
-            print(f"[完成] 汇总在 {args.out_dir}/theta/all/（参考，不作硬门控）")
-            return 0
+            else:
+                print(f"sub-{r['subj']}: QC FAIL，跳过（{r['error']}）")
+        print(f"[完成] 汇总在 {args.out_dir}/theta/all/（参考，不作硬门控）")
+        return 0
 
+    try:
         ok = probe.run_probe(args.subj, root=args.data_root, out_dir=args.out_dir)
         if ok:
             print(f"PASS: sub-{args.subj} theta 1→4-back 单调上升")

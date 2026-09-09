@@ -44,6 +44,8 @@ def test_replay_writes_meta_seg_event_summary(data_root, tmp_path):
     assert summ["n_segments"] == 10
     assert "wall_elapsed_s" not in summ and "rate_ratio" not in summ
     assert summ["n_dropped"] >= 1
+    # 2.0s 限时落在段边界 → tail_s = 0.0（限时 tail 语义：已切分样本中的残段）
+    assert abs(summ["tail_s"] - 0.0) < 1e-12
 
 
 def test_replay_jsonl_byte_deterministic(data_root, tmp_path):

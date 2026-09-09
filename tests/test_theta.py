@@ -25,7 +25,7 @@ def test_theta_power_matches_theoretical_amp_squared_half():
     t = np.arange(375) / sfreq
     epoch = 10.0 * np.sin(2 * np.pi * 6 * t)
     p = theta.theta_power_uV2(epoch[None, :], sfreq)[0]
-    assert abs(p - (10.0 ** 2) / 2) / (10.0 ** 2 / 2) < 0.25  # 容差 25%
+    assert abs(p - (10.0 ** 2) / 2) / (10.0 ** 2 / 2) < 0.05  # 容差 5%
 
 
 def test_slice_epochs_shape_and_no_overlap_counts():

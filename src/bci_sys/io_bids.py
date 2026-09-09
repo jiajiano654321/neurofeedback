@@ -65,8 +65,9 @@ def load_events(subj: str, root: Path | str | None = None) -> pd.DataFrame:
 def real_trial_events(events: pd.DataFrame) -> pd.DataFrame:
     """非练习 n-back 试次。
 
-    pandas 把 istutorial 的 "true" 解析为 True、"n/a" 解析为 NaN；
-    真实试次 istutorial 为 NaN（!= True 成立），练习试次为 True（被排除）。
+    pandas 把 istutorial 的 "true" 解析为 True、"false" 解析为 False、
+    "n/a" 解析为 NaN；真实试次 istutorial 为 False，练习试次为 True。
+    过滤条件 `!= True` 同时兼容 False 与 NaN，练习 True 被排除。
     nback_level 为 1-4 的行才是有效试次（dropped_samples 等事件为 NaN）。
     """
     tr = events[

@@ -67,25 +67,52 @@ def run_probe(subj: str, root=None, out_dir="outputs") -> bool:
 
 
 def run_all(root=None, out_dir="outputs", subs=None) -> list[dict]:
-    """多被试汇总（参考用，不作硬门控）。"""
+    """多被试汇总（参考用，不作硬门控）。
+
+    逐被试容错：preflight / _compute 抛出 (FileNotFoundError, ValueError, KeyError)
+    时只记录 error、不中断批处理；其它异常照常上抛。
+    """
     subs = subs or config.RECOMMENDED_SUBS
-    rows = []
+    rows: list[dict] = []
+    error_subs: list[str] = []
+
     fig, ax = plt.subplots(figsize=(7, 5))
     for s in subs:
-        df = _compute(s, root)
-        med = median_by_load(df)
-        ok = gate_passes(med)
-        rows.append({"subj": s, "m1": med[1], "m2": med[2], "m3": med[3],
-                     "m4": med[4], "pass": ok})
-        ax.plot([1, 2, 3, 4], [med[i] for i in (1, 2, 3, 4)], "o-",
-                label=f"sub-{s}{'' if ok else ' FAIL'}")
+        try:
+            io_bids.preflight(s, root)
+            df = _compute(s, root)
+            med = median_by_load(df)
+            ok = gate_passes(med)
+            rows.append({
+                "subj": s, "status": "ok",
+                "m1": med[1], "m2": med[2], "m3": med[3], "m4": med[4],
+                "pass": ok, "error": "",
+            })
+            ax.plot([1, 2, 3, 4], [med[i] for i in (1, 2, 3, 4)], "o-",
+                    label=f"sub-{s}{'' if ok else ' FAIL'}")
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            rows.append({
+                "subj": s, "status": "error",
+                "m1": None, "m2": None, "m3": None, "m4": None,
+                "pass": False, "error": str(e),
+            })
+            error_subs.append(s)
+
     out = Path(out_dir) / "theta" / "all"
     out.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(out / "summary.csv", index=False)
-    ax.set(xlabel="n-back level", ylabel="median Fz theta power (µV²)",
-           title="theta by load — recommended subjects")
+
+    # CSV 列固定，失败行 m1..m4 为空
+    pd.DataFrame(rows, columns=["subj", "status", "m1", "m2", "m3", "m4", "pass", "error"]
+                 ).to_csv(out / "summary.csv", index=False)
+
+    title = "theta by load — recommended subjects"
+    if error_subs:
+        title += f"\n({len(error_subs)} subject(s) excluded by preflight: {', '.join(error_subs)})"
+    ax.set(xlabel="n-back level", ylabel="median Fz theta power (µV²)", title=title)
     ax.set_xticks([1, 2, 3, 4])
-    ax.legend(fontsize=8)
+    # 有成功被试才画 legend（空 legend 会报错）
+    if any(r["status"] == "ok" for r in rows):
+        ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out / "summary.png", dpi=120)
     plt.close(fig)
