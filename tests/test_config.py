@@ -38,3 +38,11 @@ def test_data_root_default_and_env_override(monkeypatch, tmp_path):
 def test_eog_proxy_channel_names_uppercase():
     # 通道名以 channels.tsv 为准：FP1/FP2 大写
     assert config.EOG_PROXY_CHANNELS == ("FP1", "FP2")
+
+
+def test_qc_frozen_constants():
+    # IT3 冻结参数（S2 语义，运行期无修改入口）
+    assert config.QC_CALIBRATION_SEC == 120.0
+    assert config.QC_FILTER_WARMUP_SEC == 10.0
+    assert config.QC_L1_P2P_UV == 100.0
+    assert config.QC_L3_EOG_P2P_UV == 200.0

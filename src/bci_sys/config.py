@@ -30,6 +30,12 @@ RATE_YELLOW = 0.95
 # --- preflight 单位硬检查：1-30Hz 带通后 Fz std 的允许范围（µV） ---
 UNIT_STD_RANGE_UV = (5.0, 300.0)
 
+# --- IT3 实时 QC（冻结，C2：运行期无修改入口） ---
+QC_CALIBRATION_SEC = 120.0      # S3校准窗长度
+QC_FILTER_WARMUP_SEC = 10.0     # 估 EOG 回归系数时剔除的滤波器启动样本
+QC_L1_P2P_UV = 100.0            # L1：去眼电后 Fz 残差 200ms 峰峰值上限
+QC_L3_EOG_P2P_UV = 200.0        # L3：FP1/FP2 任一路 200ms 峰峰值上限（否决项）
+
 
 @dataclass(frozen=True)
 class Target:
