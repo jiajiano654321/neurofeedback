@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -39,3 +40,12 @@ def test_load_events_and_trial_filter(data_root):
     counts = tr["nback_level"].value_counts().sort_index()
     assert list(counts.index) == [1, 2, 3, 4]
     assert (counts == 100).all()
+
+
+def test_load_channels_uv_returns_named_channels(data_root):
+    ch = io_bids.load_channels_uV("001", ["Fz", "FP1", "FP2"], data_root)
+    assert set(ch.keys()) == {"Fz", "FP1", "FP2"}
+    # Fz 必须与既有单通道取数完全一致（同一 µV 取数路径，禁止二次换算）
+    fz = io_bids.load_fz_uV("001", data_root)
+    np.testing.assert_array_equal(ch["Fz"], fz)
+    assert ch["FP1"].size == ch["FP2"].size == fz.size

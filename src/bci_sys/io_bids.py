@@ -55,6 +55,19 @@ def load_fz_uV(subj: str, root: Path | str | None = None) -> np.ndarray:
     return raw.get_data()[idx]
 
 
+def load_channels_uV(
+    subj: str, names: list[str], root: Path | str | None = None
+) -> dict[str, np.ndarray]:
+    """按名返回多通道全程数据，单位 µV。
+
+    【单位陷阱】同 load_fz_uV：mne 输出经实测已是 µV，【严禁再乘 1e6】。
+    缺任一名直接 KeyError（通道映射安全靠显式按名查找，不靠位置假设）。
+    """
+    raw = load_raw(subj, root)
+    data = raw.get_data()
+    return {name: data[channel_index(raw, name)] for name in names}
+
+
 def load_events(subj: str, root: Path | str | None = None) -> pd.DataFrame:
     p = events_path(subj, root)
     if not p.exists():
@@ -112,8 +125,12 @@ def preflight(subj: str, root: Path | str | None = None) -> None:
     if abs(sfreq - config.SFREQ) > 1e-6:
         raise ValueError(f"采样率 {sfreq} != 设计值 {config.SFREQ}")
 
-    # 3. 通道：mne 侧 Fz 存在（不存在即抛 KeyError）；EEG 通道数以 channels.tsv 为准
+    # 3. 通道：Fz + EOG 代理 FP1/FP2 必须在 mne 侧与 channels.tsv 双侧按名存在
+    #    （不存在即抛 KeyError）；EEG 通道数以 channels.tsv 为准
     #    （mne 读 vhdr 可能把 24 导全标成 eeg，不能信它的类型计数）
+    required = [config.TARGET.channel, *config.EOG_PROXY_CHANNELS]
+    for name in required:
+        channel_index(raw, name)
     idx = channel_index(raw, config.TARGET.channel)
     ch_tsv = _eeg_dir(subj, root) / f"sub-{subj}_task-nback_channels.tsv"
     if not ch_tsv.exists():
@@ -122,8 +139,10 @@ def preflight(subj: str, root: Path | str | None = None) -> None:
     n_eeg = int((chans["type"] == "EEG").sum())
     if n_eeg != 19:
         raise ValueError(f"channels.tsv 中 EEG 通道数 {n_eeg} != 19")
-    if config.TARGET.channel not in set(chans["name"]):
-        raise KeyError(f"channels.tsv 中无通道 {config.TARGET.channel}")
+    ch_names = set(chans["name"])
+    for name in required:
+        if name not in ch_names:
+            raise KeyError(f"channels.tsv 中无通道 {name}")
 
     # 4. events 含 nback_level 列
     ev = pd.read_csv(ev_path, sep="\t", nrows=1)
