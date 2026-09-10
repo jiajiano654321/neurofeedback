@@ -241,6 +241,7 @@ git commit -m "feat(qc): load_channels_uV 多通道加载，preflight 强制 FP1
 import pathlib
 
 import numpy as np
+import pytest
 
 from bci_sys.replay import causal_filter as cf
 
@@ -293,11 +294,44 @@ def test_multichannel_states_are_independent():
         )
 
 
-def test_dc_offset_removed_after_startup():
-    # 稳态（跳过启动段）后输出应在零附近，不再含 1.44e6 直流
-    x = np.full(250 * 5, 1.44e6)
+def test_empty_block_does_not_corrupt_state():
+    # scipy lfilter 对空输入会返回错误非零 zf；空块必须不触碰 zi，
+    # 之后输出仍与「无空块的整段」逐点一致。
+    rng = np.random.default_rng(8)
+    x = rng.standard_normal(50 * 5) * 20.0  # 5 块数据，中间插一次空调用
+    f = cf.CausalBandpass(["c"])
+    outs = []
+    for k, s in enumerate(range(0, x.size, 50)):
+        if k == 2:
+            # 额外插一次空块（不替换数据），验证 zi 不被污染
+            f.push_block({"c": np.empty(0)})
+        outs.append(f.push_block({"c": x[s:s + 50]})["c"])
+    got = np.concatenate(outs)
+    np.testing.assert_allclose(got, cf.bandpass_oneshot(x), atol=1e-10)
+
+
+def test_2d_or_mismatched_block_raises_before_state_change():
+    rng = np.random.default_rng(9)
+    f = cf.CausalBandpass(["Fz", "FP1"])
+    good = rng.standard_normal(50)
+    f.push_block({"Fz": good, "FP1": good})  # 先推进一个正常块建立状态
+    hp_zi_before = f._hp["Fz"].zi.copy()
+    with pytest.raises(ValueError):
+        f.push_block({"Fz": good, "FP1": good.reshape(25, 2)})  # 等 size 但二维
+    with pytest.raises(ValueError):
+        f.push_block({"Fz": good, "FP1": good[:10]})            # 长度不等
+    np.testing.assert_array_equal(f._hp["Fz"].zi, hp_zi_before)  # 状态未被污染
+
+
+def test_dc_offset_and_startup_transient():
+    # 常数 1.44e6（实测直流偏移量级）阶跃输入：
+    # 零初始 zi 的 1Hz 高通启动瞬态实测 2s 时仍有 ~6200µV、~9s 才衰减完，
+    # 这正是 QC 剔除前 10s warmup 的原因（数值已实测，勿照手册反推）。
+    x = np.full(250 * 12, 1.44e6)
     y = cf.bandpass_oneshot(x)
-    assert abs(y[250 * 2 :]).max() < 1e-3
+    assert np.abs(y[: 250 * 10]).max() > 100.0   # warmup 期内确有大瞬态
+    # 10s 后残差 ≈ 0（实测停在 ~1.3e-3µV 的浮点舍入底噪，相对 µV 信号可忽略）
+    assert np.abs(y[250 * 10 :]).max() < 1e-2
 
 
 def test_module_never_calls_filtfilt():
@@ -391,13 +425,22 @@ class CausalBandpass:
         self._lp = {c: _CausalSection(b_lp, a_lp) for c in self.channels}
 
     def push_block(self, block: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """所有通道块长必须一致；返回同结构的滤波后块（单位与输入相同，µV）。"""
-        sizes = {np.asarray(block[c]).size for c in self.channels}
-        if len(sizes) != 1:
-            raise ValueError(f"各通道块长不一致: {sizes}")
+        """所有通道块必须等长且一维；返回同结构滤波后块（单位与输入相同，µV）。
+
+        空块直接原样返回、不触碰 zi（实测 scipy lfilter 对空输入会返回错误的
+        非零 zf 并永久污染 IIR 状态）；非法形状在推进任何状态【之前】报错，
+        保证调用失败不污染滤波器（分块==整段不变量不被边界输入击穿）。
+        """
+        arrays = {c: np.asarray(block[c], dtype=float) for c in self.channels}
+        sizes = {a.size for a in arrays.values()}
+        ndims = {a.ndim for a in arrays.values()}
+        if len(sizes) != 1 or ndims != {1}:
+            raise ValueError(f"各通道块必须等长且一维: sizes={sizes}, ndims={ndims}")
+        if sizes == {0}:
+            return {c: np.empty(0, dtype=float) for c in self.channels}
         out: dict[str, np.ndarray] = {}
         for c in self.channels:
-            y = self._hp[c].push(block[c])
+            y = self._hp[c].push(arrays[c])
             out[c] = self._lp[c].push(y)
         return out
 ```
@@ -405,7 +448,7 @@ class CausalBandpass:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_causal_filter.py -v`
-Expected: PASS（5 个）
+Expected: PASS（7 个）
 
 - [ ] **Step 5: 提交**
 
@@ -478,6 +521,32 @@ def test_ols_rejects_nonfinite_and_bad_arguments():
         qc.fit_eog_coeffs(np.zeros(n), np.zeros(n - 1), np.zeros(n), 0)
     with pytest.raises(ValueError):
         qc.fit_eog_coeffs(np.zeros(n), np.zeros(n), np.zeros(n), n + 1)
+
+
+def test_ols_rejects_zero_rank_eog_and_accepts_one_flat_channel():
+    rng = np.random.default_rng(10)
+    n = 5000
+    good = rng.standard_normal(n) * 30.0
+    fz = 0.4 * good + rng.standard_normal(n) * 5.0
+    flat = np.zeros(n)
+    # 两路 EOG 全程恒定 → 设计矩阵零秩 → 硬拦（不许静默冻结成 b=0 不去眼电）
+    with pytest.raises(ValueError, match="零秩"):
+        qc.fit_eog_coeffs(fz, flat, flat, start_sample=0)
+    # 一路恒定、另一路有效（秩1）仍可接受：好通道系数估出、平通道系数≈0
+    b1, b2 = qc.fit_eog_coeffs(fz, good, flat, start_sample=0)
+    assert abs(b1 - 0.4) < 0.02 and abs(b2) < 1e-8
+
+
+def test_ols_inf_input_raises_without_runtime_warning():
+    import warnings
+
+    n = 100
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # 去均值不得先报警
+        with pytest.raises(ValueError):
+            qc.fit_eog_coeffs(
+                np.full(n, np.inf), np.ones(n), np.full(n, 2.0), 0
+            )
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -513,7 +582,8 @@ def fit_eog_coeffs(fz_f, fp1_f, fp2_f, start_sample: int) -> tuple[float, float]
 
         Fz_centered = b1 * FP1_centered + b2 * FP2_centered
 
-    返回 (b1, b2)。长度不一致、起点越界或系数非有限（NaN/Inf）→ ValueError。
+    返回 (b1, b2)。长度不一致、起点越界、输入非有限，或设计矩阵零秩
+    （FP1/FP2 在校准窗内全程恒定，如通道脱落/夹断）→ ValueError。
     """
     fz = np.asarray(fz_f, dtype=float)
     fp1 = np.asarray(fp1_f, dtype=float)
@@ -523,9 +593,19 @@ def fit_eog_coeffs(fz_f, fp1_f, fp2_f, start_sample: int) -> tuple[float, float]
     if start_sample < 0 or start_sample >= fz.size:
         raise ValueError(f"warmup 起点越界: {start_sample} / {fz.size}")
 
-    y = fz[start_sample:] - fz[start_sample:].mean()
-    X = np.column_stack([fp1[start_sample:], fp2[start_sample:]])
-    X = X - X.mean(axis=0, keepdims=True)
+    y0 = fz[start_sample:]
+    X0 = np.column_stack([fp1[start_sample:], fp2[start_sample:]])
+    # 先在原始切片上拦非有限：若先做 inf−mean(inf) 去均值会先抛 RuntimeWarning。
+    # 也防住「y 全 NaN、X 全零」时 lstsq 静默返回有限 [0,0] 绕过后续检查。
+    if not (np.all(np.isfinite(y0)) and np.all(np.isfinite(X0))):
+        raise ValueError("EOG 回归输入含非有限值（NaN/Inf），校准失败")
+    y = y0 - y0.mean()
+    X = X0 - X0.mean(axis=0, keepdims=True)
+    # 零秩（两路去均值后全 0＝全程恒定）时 lstsq 静默返回有限 [0,0]，会伪装成
+    # 「冻结成功但完全不去眼电」，必须硬拦（C7）。秩 1（两通道共线、或一路恒定）
+    # 仍给出唯一有效的去眼电线性组合（实测最小范数解的残差相同），可接受。
+    if np.linalg.matrix_rank(X) == 0:
+        raise ValueError("EOG 回归设计矩阵零秩（FP1/FP2 校准窗内恒定？），校准失败")
     b, *_ = np.linalg.lstsq(X, y, rcond=None)
     if not np.all(np.isfinite(b)):
         raise ValueError("EOG 回归系数非有限值（NaN/Inf），校准失败")
@@ -535,7 +615,7 @@ def fit_eog_coeffs(fz_f, fp1_f, fp2_f, start_sample: int) -> tuple[float, float]
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_qc.py -v`
-Expected: PASS（4 个）
+Expected: PASS（6 个）
 
 - [ ] **Step 5: 提交**
 
