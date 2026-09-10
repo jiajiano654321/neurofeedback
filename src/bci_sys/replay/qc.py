@@ -53,3 +53,111 @@ def fit_eog_coeffs(fz_f, fp1_f, fp2_f, start_sample: int) -> tuple[float, float]
     if not np.all(np.isfinite(b)):
         raise ValueError("EOG 回归系数非有限值（NaN/Inf），校准失败")
     return float(b[0]), float(b[1])
+
+
+class QcJudge:
+    """校准→运行状态机。逐段喂入【已因果带通】的三路等长块。
+
+    - 未冻结：累积滤波后样本；段段返回 phase="calibration"（valid=None）。
+      累积到 calibration_sec 对应样本数的那一段，用 [warmup_sec, calibration_sec]
+      区间一次性估计并冻结 b，在该段返回值里附带 calib 记录（仅一次）。
+    - 冻结后：残差 L1 + EOG L3 裁决，返回 phase="running"。
+    - 数据短于校准窗：永不冻结，调用方循环正常结束（短回放/测试场景）。
+    """
+
+    def __init__(
+        self,
+        calibration_sec: float = config.QC_CALIBRATION_SEC,
+        warmup_sec: float = config.QC_FILTER_WARMUP_SEC,
+        sfreq: float = config.SFREQ,
+        l1_thr: float = config.QC_L1_P2P_UV,
+        l3_thr: float = config.QC_L3_EOG_P2P_UV,
+        fz_name: str = config.TARGET.channel,
+        eog_names: tuple[str, str] = config.EOG_PROXY_CHANNELS,
+    ):
+        self.calibration_sec = float(calibration_sec)
+        self.warmup_sec = float(warmup_sec)
+        self.sfreq = float(sfreq)
+        self.l1_thr = float(l1_thr)
+        self.l3_thr = float(l3_thr)
+        self.fz_name = fz_name
+        self.eog_names = tuple(eog_names)
+
+        self.calib_samples = int(round(self.calibration_sec * self.sfreq))
+        self.warmup_samples = int(round(self.warmup_sec * self.sfreq))
+        self._names = (self.fz_name, *self.eog_names)
+        self._buf = {c: [] for c in self._names}
+        self._n_accum = 0
+        self.b_fp1: float | None = None
+        self.b_fp2: float | None = None
+        self.frozen = False
+        self.calib: dict | None = None
+
+    def _calibration_verdict(self) -> dict:
+        return {
+            "phase": "calibration",
+            "fz_clean_p2p": None,
+            "eog_p2p": None,
+            "valid": None,
+            "reasons": [],
+        }
+
+    def push(self, t1: float, filtered: dict[str, np.ndarray]) -> dict:
+        """t1=本段结束的数据时间（秒）；filtered 含 Fz/FP1/FP2 三路本段样本。"""
+        if self.frozen:
+            return self._running_verdict(filtered)
+
+        block_len = np.asarray(filtered[self.fz_name]).size
+        for c in self._names:
+            self._buf[c].append(np.asarray(filtered[c], dtype=float))
+        self._n_accum += block_len
+
+        verdict = self._calibration_verdict()
+        if self._n_accum >= self.calib_samples:
+            self._freeze(t1)
+            verdict["calib"] = self.calib
+        return verdict
+
+    def _freeze(self, t1: float) -> None:
+        arrs = {c: np.concatenate(self._buf[c]) for c in self._names}
+        b1, b2 = fit_eog_coeffs(
+            arrs[self.fz_name],
+            arrs[self.eog_names[0]],
+            arrs[self.eog_names[1]],
+            self.warmup_samples,
+        )
+        self.b_fp1, self.b_fp2 = b1, b2
+        self.frozen = True
+        self.calib = {
+            "type": "calib",
+            "t_sec": round(float(t1), 6),
+            "b_fp1": b1,
+            "b_fp2": b2,
+            "fit_window_sec": [self.warmup_sec, self.calibration_sec],
+            "n_fit_samples": self.calib_samples - self.warmup_samples,
+        }
+        self._buf = {}  # 校准原始缓冲不再需要
+
+    def _running_verdict(self, filtered: dict[str, np.ndarray]) -> dict:
+        fz = np.asarray(filtered[self.fz_name], dtype=float)
+        fp1 = np.asarray(filtered[self.eog_names[0]], dtype=float)
+        fp2 = np.asarray(filtered[self.eog_names[1]], dtype=float)
+
+        clean = fz - self.b_fp1 * fp1 - self.b_fp2 * fp2
+        clean_p2p = p2p_uv(clean)
+        eog_p2p = max(p2p_uv(fp1), p2p_uv(fp2))  # 两路取大
+        # 用 not(<=) 而非 (>)：非有限（NaN）段也判命中，绝不把坏段静默标成有效。
+        hit_l1 = not (clean_p2p <= self.l1_thr)
+        hit_l3 = not (eog_p2p <= self.l3_thr)
+        reasons = []
+        if hit_l1:
+            reasons.append("L1")
+        if hit_l3:
+            reasons.append("L3")
+        return {
+            "phase": "running",
+            "fz_clean_p2p": clean_p2p,
+            "eog_p2p": eog_p2p,
+            "valid": not (hit_l1 or hit_l3),
+            "reasons": reasons,
+        }
