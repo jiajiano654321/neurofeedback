@@ -1,3 +1,4 @@
+"""qc-monitor 命令行入口的子进程测试（退出码 0/2、产物、零垃圾）。"""
 import json
 import subprocess
 import sys
