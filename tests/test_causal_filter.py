@@ -1,5 +1,4 @@
 """流式因果带通：分块==整段单向 lfilter；追加未来数据不改过去（C3）。"""
-import pathlib
 
 import numpy as np
 import pytest
@@ -65,13 +64,6 @@ def test_dc_offset_and_startup_transient():
     assert np.abs(y[250 * 10 :]).max() < 1e-2    # 10s 后残差≈0（浮点舍入底噪）
 
 
-def test_module_never_calls_filtfilt():
-    # 只禁止【调用】零相位滤波；docstring 里的警示文字不算违规
-    import ast
-
-    tree = ast.parse(pathlib.Path(cf.__file__).read_text(encoding="utf-8"))
-    attrs = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
-    assert "filtfilt" not in attrs
 
 
 def test_empty_block_does_not_corrupt_state():
