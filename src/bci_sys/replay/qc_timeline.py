@@ -43,11 +43,20 @@ def _row_color(row: dict) -> str:
     has_l3 = "L3" in row["reasons"]
     if has_l1 and has_l3:
         return COLORS["both"]
-    return COLORS["L1"] if has_l1 else COLORS["L3"]
+    if has_l1:
+        return COLORS["L1"]
+    # valid=False 但 reasons 为空等异常行：最坏情况按 L3 红显示，绝不漂绿
+    return COLORS["L3"]
 
 
-def _bin_valid_rates(rows: list[dict], bin_sec: float = BIN_SEC):
-    """仅运行期段按 t1 落 30s 箱；返回 (箱中心秒, 有效率)。校准箱自然不出现。"""
+def _bin_valid_rates(
+    rows: list[dict], bin_sec: float = BIN_SEC
+) -> tuple[np.ndarray, np.ndarray]:
+    """仅运行期段按 t1 落 30s 箱；返回 (箱中心秒, 有效率)。
+
+    校准段不参与。被覆盖区间内的空箱（段缺口）返回 NaN，使折线视觉断开，
+    而不是把跨过缺口的两个非空箱直接连线。
+    """
     run = [r for r in rows if r["phase"] == "running"]
     if not run:
         return np.array([]), np.array([])
@@ -57,27 +66,31 @@ def _bin_valid_rates(rows: list[dict], bin_sec: float = BIN_SEC):
     xs, ys = [], []
     for k in range(b.min(), b.max() + 1):
         m = b == k
-        if m.any():
-            xs.append((k + 0.5) * bin_sec)
-            ys.append(float(valid[m].mean()))
+        xs.append((k + 0.5) * bin_sec)
+        ys.append(float(valid[m].mean()) if m.any() else np.nan)
     return np.array(xs), np.array(ys)
 
 
-def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "") -> None:
-    rows = load_seg_rows(qc_jsonl_path)
+def build_timeline_figure(rows: list[dict], subj: str = ""):
+    """从 seg 行构造时间轴 Figure（不落盘），返回 (fig, title_art, legend)。
+
+    独立成函数便于测试直接断言标题文本、并用渲染器 bbox 验证标题与图例
+    几何不重叠（本图唯一的交付物是给人看的 PNG）。
+    """
     fig, (ax0, ax1) = plt.subplots(
         2, 1, figsize=(10, 4.2), sharex=True,
         gridspec_kw={"height_ratios": [1, 5]},
     )
 
-    # 上轨：逐段裁决色带
+    # 上轨：逐段裁决色带，等宽铺开。前提：seg 从 0 起、0.2s 无缺口按序排列
+    # （qc_monitor 的产出满足；事后图不对缺口做时间定位）。
     t_max = rows[-1]["t1"] if rows else 1.0
     rgb = np.array([[mcolors.to_rgb(_row_color(r)) for r in rows]])
     ax0.imshow(rgb, aspect="auto", extent=[0.0, t_max, 0.0, 1.0])
     ax0.set_yticks([])
     ax0.set_ylabel("verdict")
 
-    # 下轨：运行期 30s 分箱有效率
+    # 下轨：运行期 30s 分箱有效率（空箱为 NaN，折线自动断开）
     bx, by = _bin_valid_rates(rows)
     if bx.size:
         ax1.plot(bx, by, "o-", ms=4, color="#1f77b4")
@@ -91,7 +104,8 @@ def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "
     if run:
         overall = sum(1 for r in run if r["valid"]) / len(run)
         title += f" — overall {overall:.1%} (running only, calibration excluded)"
-    fig.suptitle(title, fontsize=11)
+    # 水平分区：子图 ≤0.90，图例带 0.90–0.96，标题 ≥0.97，三者不重叠
+    title_art = fig.suptitle(title, fontsize=11, y=0.985)
 
     handles = [
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["calibration"], label="calibration"),
@@ -100,7 +114,16 @@ def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["L3"], label="invalid L3"),
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["both"], label="invalid L1+L3"),
     ]
-    fig.legend(handles=handles, loc="upper right", ncol=5, fontsize=7, framealpha=0.9)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    legend = fig.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.93),
+        ncol=5, fontsize=7, framealpha=0.9,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    return fig, title_art, legend
+
+
+def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "") -> None:
+    rows = load_seg_rows(qc_jsonl_path)
+    fig, _, _ = build_timeline_figure(rows, subj)
     fig.savefig(png_path, dpi=120)
     plt.close(fig)
