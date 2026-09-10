@@ -70,12 +70,21 @@ class CausalBandpass:
         self._lp = {c: _CausalSection(b_lp, a_lp) for c in self.channels}
 
     def push_block(self, block: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """所有通道块长必须一致；返回同结构的滤波后块（单位与输入相同，µV）。"""
-        sizes = {np.asarray(block[c]).size for c in self.channels}
-        if len(sizes) != 1:
-            raise ValueError(f"各通道块长不一致: {sizes}")
+        """所有通道块必须等长且一维；返回同结构滤波后块（单位与输入相同，µV）。
+
+        空块直接原样返回、不触碰 zi（实测 scipy lfilter 对空输入会返回错误的
+        非零 zf 并永久污染 IIR 状态）；非法形状在推进任何状态【之前】报错，
+        保证调用失败不污染滤波器（分块==整段不变量不被边界输入击穿）。
+        """
+        arrays = {c: np.asarray(block[c], dtype=float) for c in self.channels}
+        sizes = {a.size for a in arrays.values()}
+        ndims = {a.ndim for a in arrays.values()}
+        if len(sizes) != 1 or ndims != {1}:
+            raise ValueError(f"各通道块必须等长且一维: sizes={sizes}, ndims={ndims}")
+        if sizes == {0}:
+            return {c: np.empty(0, dtype=float) for c in self.channels}
         out: dict[str, np.ndarray] = {}
         for c in self.channels:
-            y = self._hp[c].push(block[c])
+            y = self._hp[c].push(arrays[c])
             out[c] = self._lp[c].push(y)
         return out

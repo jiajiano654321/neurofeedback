@@ -2,6 +2,7 @@
 import pathlib
 
 import numpy as np
+import pytest
 
 from bci_sys.replay import causal_filter as cf
 
@@ -71,3 +72,32 @@ def test_module_never_calls_filtfilt():
     tree = ast.parse(pathlib.Path(cf.__file__).read_text(encoding="utf-8"))
     attrs = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
     assert "filtfilt" not in attrs
+
+
+def test_empty_block_does_not_corrupt_state():
+    # scipy lfilter 对空输入会返回错误非零 zf；空块必须不触碰 zi，
+    # 之后输出仍与「无空块的整段」逐点一致。
+    rng = np.random.default_rng(8)
+    x = rng.standard_normal(50 * 5) * 20.0  # 5 块数据，中间插一次空调用
+    f = cf.CausalBandpass(["c"])
+    outs = []
+    for k, s in enumerate(range(0, x.size, 50)):
+        if k == 2:
+            # 额外插一次空块（不替换数据），验证 zi 不被污染
+            f.push_block({"c": np.empty(0)})
+        outs.append(f.push_block({"c": x[s:s + 50]})["c"])
+    got = np.concatenate(outs)
+    np.testing.assert_allclose(got, cf.bandpass_oneshot(x), atol=1e-10)
+
+
+def test_2d_or_mismatched_block_raises_before_state_change():
+    rng = np.random.default_rng(9)
+    f = cf.CausalBandpass(["Fz", "FP1"])
+    good = rng.standard_normal(50)
+    f.push_block({"Fz": good, "FP1": good})  # 先推进一个正常块建立状态
+    hp_zi_before = f._hp["Fz"].zi.copy()
+    with pytest.raises(ValueError):
+        f.push_block({"Fz": good, "FP1": good.reshape(25, 2)})  # 等 size 但二维
+    with pytest.raises(ValueError):
+        f.push_block({"Fz": good, "FP1": good[:10]})            # 长度不等
+    np.testing.assert_array_equal(f._hp["Fz"].zi, hp_zi_before)  # 状态未被污染
