@@ -718,6 +718,33 @@ def test_judge_running_verdicts_l1_l3_both():
     assert v["valid"] is True
 
 
+def test_judge_nan_segment_is_never_marked_valid():
+    # 非有限段不得被 nan>thr=False 静默判成有效（L1/L3 同时命中）
+    fz, fp1, fp2 = _synthetic_120s()
+    judge = qc.QcJudge()
+    for k, blk in enumerate(_blocks(fz, fp1, fp2)):
+        judge.push((k + 1) * 0.2, blk)
+    nan_block = {c: np.full(50, np.nan) for c in ("Fz", "FP1", "FP2")}
+    v = judge.push(120.2, nan_block)
+    assert v["valid"] is False
+    assert set(v["reasons"]) == {"L1", "L3"}
+
+    # 仅 Fz 含 NaN、EOG 干净：只命中 L1，不冤枉 L3
+    v = judge.push(120.4, {
+        "Fz": np.full(50, np.nan), "FP1": np.zeros(50), "FP2": np.zeros(50),
+    })
+    assert v["valid"] is False and v["reasons"] == ["L1"]
+
+    # 任一 EOG 通道单独 NaN（两个方向都测）：内建 max 的 NaN 顺序坑不得漏判 L3，
+    # 且 eog_p2p 必须是 NaN 而不是 0（不许掩盖坏通道，C5）
+    zero = np.zeros(50)
+    v_fp1 = judge.push(120.6, {"Fz": zero, "FP1": np.full(50, np.nan), "FP2": zero})
+    v_fp2 = judge.push(120.8, {"Fz": zero, "FP1": zero, "FP2": np.full(50, np.nan)})
+    for vx in (v_fp1, v_fp2):
+        assert vx["valid"] is False and set(vx["reasons"]) == {"L1", "L3"}
+        assert np.isnan(vx["eog_p2p"])
+
+
 def test_judge_short_run_never_freezes():
     # 数据短于 120s：全程 calibration，无 calib，无异常
     fz, fp1, fp2 = _synthetic_120s()
@@ -756,6 +783,31 @@ def test_judge_warmup_excludes_startup_transient():
     assert judge.frozen
     assert abs(v["calib"]["b_fp1"] - 0.40) < 0.05
     assert v["calib"]["n_fit_samples"] == 125
+
+
+def test_judge_overshooting_blocks_fit_exactly_calib_samples():
+    """块长不整除校准窗（30 不整除 100）：跨边界冻结时只拟合前 100 点，
+    calib 记录的样本数/系数必须与「恰好前 100 点」一致，不许夸大到 120。"""
+    rng = np.random.default_rng(11)
+    sf, cal, warm, blk = 250.0, 0.4, 0.0, 30
+    cal_n = int(cal * sf)  # 100
+    n = 150
+    fp1 = rng.standard_normal(n) * 30.0
+    fp2 = rng.standard_normal(n) * 25.0
+    fz = 0.30 * fp1 + 0.50 * fp2 + rng.standard_normal(n) * 5.0
+    arrs = {"Fz": fz, "FP1": fp1, "FP2": fp2}
+    judge = qc.QcJudge(calibration_sec=cal, warmup_sec=warm, sfreq=sf)
+    v = None
+    for s in range(0, n, blk):
+        e = min(s + blk, n)
+        v = judge.push(e / sf, {c: a[s:e] for c, a in arrs.items()})
+        if judge.frozen:
+            break
+    assert judge.frozen
+    assert v["calib"]["n_fit_samples"] == cal_n
+    b1, b2 = qc.fit_eog_coeffs(fz[:cal_n], fp1[:cal_n], fp2[:cal_n], 0)
+    assert v["calib"]["b_fp1"] == pytest.approx(b1)
+    assert v["calib"]["b_fp2"] == pytest.approx(b2)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -790,14 +842,14 @@ class QcJudge:
     ):
         self.calibration_sec = float(calibration_sec)
         self.warmup_sec = float(warmup_sec)
-        self.sfreq = float(sfreq)
         self.l1_thr = float(l1_thr)
         self.l3_thr = float(l3_thr)
         self.fz_name = fz_name
         self.eog_names = tuple(eog_names)
 
-        self.calib_samples = int(round(self.calibration_sec * self.sfreq))
-        self.warmup_samples = int(round(self.warmup_sec * self.sfreq))
+        sfreq = float(sfreq)
+        self.calib_samples = int(round(self.calibration_sec * sfreq))
+        self.warmup_samples = int(round(self.warmup_sec * sfreq))
         self._names = (self.fz_name, *self.eog_names)
         self._buf = {c: [] for c in self._names}
         self._n_accum = 0
@@ -816,7 +868,11 @@ class QcJudge:
         }
 
     def push(self, t1: float, filtered: dict[str, np.ndarray]) -> dict:
-        """t1=本段结束的数据时间（秒）；filtered 含 Fz/FP1/FP2 三路本段样本。"""
+        """t1=本段结束的数据时间（秒）；filtered 含 Fz/FP1/FP2 三路本段样本。
+
+        前置条件（由上游 CausalBandpass/iter_segments 保证）：三路块非空、
+        等长、一维。本状态机不重复这些形状检查。
+        """
         if self.frozen:
             return self._running_verdict(filtered)
 
@@ -832,7 +888,12 @@ class QcJudge:
         return verdict
 
     def _freeze(self, t1: float) -> None:
-        arrs = {c: np.concatenate(self._buf[c]) for c in self._names}
+        # 块长可能跨过校准边界：只拟合前 calib_samples 个，保证 calib 记录的
+        # 窗口/样本数与真实拟合一致（生产 50 整除 30000，不会触发截断）。
+        arrs = {
+            c: np.concatenate(self._buf[c])[: self.calib_samples]
+            for c in self._names
+        }
         b1, b2 = fit_eog_coeffs(
             arrs[self.fz_name],
             arrs[self.eog_names[0]],
@@ -858,9 +919,13 @@ class QcJudge:
 
         clean = fz - self.b_fp1 * fp1 - self.b_fp2 * fp2
         clean_p2p = p2p_uv(clean)
-        eog_p2p = max(p2p_uv(fp1), p2p_uv(fp2))  # 两路取大
-        hit_l1 = clean_p2p > self.l1_thr
-        hit_l3 = eog_p2p > self.l3_thr
+        # 两路取大必须用 np.maximum：内建 max 遇 NaN 有顺序依赖
+        # （max(nan,0)=nan 但 max(0,nan)=0），会让 FP2 一路 NaN 时漏判 L3
+        # 还把 eog_p2p 记成 0。np.maximum 任一为 NaN 都传 NaN，两路对称。
+        eog_p2p = float(np.maximum(p2p_uv(fp1), p2p_uv(fp2)))
+        # 用 not(<=) 而非 (>)：非有限（NaN）段也判命中，绝不把坏段静默标成有效。
+        hit_l1 = not (clean_p2p <= self.l1_thr)
+        hit_l3 = not (eog_p2p <= self.l3_thr)
         reasons = []
         if hit_l1:
             reasons.append("L1")
@@ -878,7 +943,7 @@ class QcJudge:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_qc.py -v`
-Expected: PASS（10 个）
+Expected: PASS（13 个：Task 4 的 6 个 + 本任务 7 个）
 
 - [ ] **Step 5: 提交**
 
@@ -909,6 +974,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from bci_sys.replay import qc_timeline
 
@@ -927,10 +993,11 @@ def _write_jsonl(path, seg_specs):
 
 
 def test_timeline_png_from_mixed_labels(tmp_path):
+    # 600 校准段（0–120s）+ 300 运行段（120.2–180.0s，跨两个 30s 箱）
     specs = []
-    for k in range(600):  # 0–120s 校准
+    for k in range(600):
         specs.append(((k + 1) * 0.2, "calibration", None, []))
-    for k in range(600, 750):  # 120–150s：交替有效/无效
+    for k in range(600, 900):
         t1 = (k + 1) * 0.2
         if k % 4 == 0:
             specs.append((t1, "running", False, ["L3"]))
@@ -947,6 +1014,46 @@ def test_timeline_png_from_mixed_labels(tmp_path):
     assert png.exists() and png.stat().st_size > 1000
     img = plt.imread(png)
     assert img.ndim == 3 and img.shape[2] in (3, 4)
+
+    # 30s 分箱数值：bin4(k=600..749) 74/150 有效，bin5(k=750..899) 76/150 有效
+    rows = qc_timeline.load_seg_rows(jsonl)
+    bx, by = qc_timeline._bin_valid_rates(rows)
+    np.testing.assert_allclose(bx, [135.0, 165.0])
+    np.testing.assert_allclose(by, [74 / 150, 76 / 150])
+
+    # 五态配色直取
+    assert qc_timeline._row_color({"phase": "calibration"}) == qc_timeline.COLORS["calibration"]
+    assert qc_timeline._row_color(
+        {"phase": "running", "valid": True, "reasons": []}) == qc_timeline.COLORS["valid"]
+    assert qc_timeline._row_color(
+        {"phase": "running", "valid": False, "reasons": ["L1"]}) == qc_timeline.COLORS["L1"]
+    assert qc_timeline._row_color(
+        {"phase": "running", "valid": False, "reasons": ["L3"]}) == qc_timeline.COLORS["L3"]
+    assert qc_timeline._row_color(
+        {"phase": "running", "valid": False, "reasons": ["L1", "L3"]}) == qc_timeline.COLORS["both"]
+
+    # 标题含总体有效率（150/300 = 50.0%，仅运行期）；标题与图例几何不重叠
+    fig, title_art, legend = qc_timeline.build_timeline_figure(rows, subj="001")
+    try:
+        assert "50.0%" in title_art.get_text()
+        fig.canvas.draw()
+        rend = fig.canvas.get_renderer()
+        assert not legend.get_window_extent(rend).overlaps(
+            title_art.get_window_extent(rend))
+    finally:
+        plt.close(fig)
+
+
+def test_bin_rates_nan_for_empty_bin():
+    # bin4 两段 + bin6 一段，中间 bin5 空缺 → 该箱 NaN，折线断开不桥接
+    rows = [
+        {"type": "seg", "phase": "running", "t1": 120.2, "valid": True, "reasons": []},
+        {"type": "seg", "phase": "running", "t1": 120.4, "valid": False, "reasons": ["L3"]},
+        {"type": "seg", "phase": "running", "t1": 181.0, "valid": True, "reasons": []},
+    ]
+    bx, by = qc_timeline._bin_valid_rates(rows)
+    np.testing.assert_allclose(bx, [135.0, 165.0, 195.0])
+    assert by[0] == 0.5 and np.isnan(by[1]) and by[2] == 1.0
 
 
 def test_timeline_all_calibration_still_renders(tmp_path):
@@ -1013,11 +1120,20 @@ def _row_color(row: dict) -> str:
     has_l3 = "L3" in row["reasons"]
     if has_l1 and has_l3:
         return COLORS["both"]
-    return COLORS["L1"] if has_l1 else COLORS["L3"]
+    if has_l1:
+        return COLORS["L1"]
+    # valid=False 但 reasons 为空等异常行：最坏情况按 L3 红显示，绝不漂绿
+    return COLORS["L3"]
 
 
-def _bin_valid_rates(rows: list[dict], bin_sec: float = BIN_SEC):
-    """仅运行期段按 t1 落 30s 箱；返回 (箱中心秒, 有效率)。校准箱自然不出现。"""
+def _bin_valid_rates(
+    rows: list[dict], bin_sec: float = BIN_SEC
+) -> tuple[np.ndarray, np.ndarray]:
+    """仅运行期段按 t1 落 30s 箱；返回 (箱中心秒, 有效率)。
+
+    校准段不参与。被覆盖区间内的空箱（段缺口）返回 NaN，使折线视觉断开，
+    而不是把跨过缺口的两个非空箱直接连线。
+    """
     run = [r for r in rows if r["phase"] == "running"]
     if not run:
         return np.array([]), np.array([])
@@ -1027,27 +1143,31 @@ def _bin_valid_rates(rows: list[dict], bin_sec: float = BIN_SEC):
     xs, ys = [], []
     for k in range(b.min(), b.max() + 1):
         m = b == k
-        if m.any():
-            xs.append((k + 0.5) * bin_sec)
-            ys.append(float(valid[m].mean()))
+        xs.append((k + 0.5) * bin_sec)
+        ys.append(float(valid[m].mean()) if m.any() else np.nan)
     return np.array(xs), np.array(ys)
 
 
-def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "") -> None:
-    rows = load_seg_rows(qc_jsonl_path)
+def build_timeline_figure(rows: list[dict], subj: str = ""):
+    """从 seg 行构造时间轴 Figure（不落盘），返回 (fig, title_art, legend)。
+
+    独立成函数便于测试直接断言标题文本、并用渲染器 bbox 验证标题与图例
+    几何不重叠（本图唯一的交付物是给人看的 PNG）。
+    """
     fig, (ax0, ax1) = plt.subplots(
         2, 1, figsize=(10, 4.2), sharex=True,
         gridspec_kw={"height_ratios": [1, 5]},
     )
 
-    # 上轨：逐段裁决色带
+    # 上轨：逐段裁决色带，等宽铺开。前提：seg 从 0 起、0.2s 无缺口按序排列
+    # （qc_monitor 的产出满足；事后图不对缺口做时间定位）。
     t_max = rows[-1]["t1"] if rows else 1.0
     rgb = np.array([[mcolors.to_rgb(_row_color(r)) for r in rows]])
     ax0.imshow(rgb, aspect="auto", extent=[0.0, t_max, 0.0, 1.0])
     ax0.set_yticks([])
     ax0.set_ylabel("verdict")
 
-    # 下轨：运行期 30s 分箱有效率
+    # 下轨：运行期 30s 分箱有效率（空箱为 NaN，折线自动断开）
     bx, by = _bin_valid_rates(rows)
     if bx.size:
         ax1.plot(bx, by, "o-", ms=4, color="#1f77b4")
@@ -1061,7 +1181,8 @@ def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "
     if run:
         overall = sum(1 for r in run if r["valid"]) / len(run)
         title += f" — overall {overall:.1%} (running only, calibration excluded)"
-    fig.suptitle(title, fontsize=11)
+    # 水平分区：子图 ≤0.90，图例带 0.90–0.96，标题 ≥0.97，三者不重叠
+    title_art = fig.suptitle(title, fontsize=11, y=0.985)
 
     handles = [
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["calibration"], label="calibration"),
@@ -1070,8 +1191,17 @@ def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["L3"], label="invalid L3"),
         plt.Line2D([0], [0], marker="s", linestyle="", color=COLORS["both"], label="invalid L1+L3"),
     ]
-    fig.legend(handles=handles, loc="upper right", ncol=5, fontsize=7, framealpha=0.9)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    legend = fig.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.93),
+        ncol=5, fontsize=7, framealpha=0.9,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    return fig, title_art, legend
+
+
+def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "") -> None:
+    rows = load_seg_rows(qc_jsonl_path)
+    fig, _, _ = build_timeline_figure(rows, subj)
     fig.savefig(png_path, dpi=120)
     plt.close(fig)
 ```
@@ -1079,7 +1209,7 @@ def plot_timeline(qc_jsonl_path: Path | str, png_path: Path | str, subj: str = "
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_qc_timeline.py -v`
-Expected: PASS（2 个）
+Expected: PASS（3 个：混合标签含分箱/配色/几何断言、空箱 NaN、全校准可渲染）
 
 - [ ] **Step 5: 提交**
 
