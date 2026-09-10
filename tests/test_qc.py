@@ -49,3 +49,29 @@ def test_ols_rejects_nonfinite_and_bad_arguments():
         qc.fit_eog_coeffs(np.zeros(n), np.zeros(n - 1), np.zeros(n), 0)
     with pytest.raises(ValueError):
         qc.fit_eog_coeffs(np.zeros(n), np.zeros(n), np.zeros(n), n + 1)
+
+
+def test_ols_rejects_zero_rank_eog_and_accepts_one_flat_channel():
+    rng = np.random.default_rng(10)
+    n = 5000
+    good = rng.standard_normal(n) * 30.0
+    fz = 0.4 * good + rng.standard_normal(n) * 5.0
+    flat = np.zeros(n)
+    # 两路 EOG 全程恒定 → 设计矩阵零秩 → 硬拦（不许静默冻结成 b=0 不去眼电）
+    with pytest.raises(ValueError, match="零秩"):
+        qc.fit_eog_coeffs(fz, flat, flat, start_sample=0)
+    # 一路恒定、另一路有效（秩1）仍可接受：好通道系数估出、平通道系数≈0
+    b1, b2 = qc.fit_eog_coeffs(fz, good, flat, start_sample=0)
+    assert abs(b1 - 0.4) < 0.02 and abs(b2) < 1e-8
+
+
+def test_ols_inf_input_raises_without_runtime_warning():
+    import warnings
+
+    n = 100
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # 去均值不得先报警
+        with pytest.raises(ValueError):
+            qc.fit_eog_coeffs(
+                np.full(n, np.inf), np.ones(n), np.full(n, 2.0), 0
+            )
