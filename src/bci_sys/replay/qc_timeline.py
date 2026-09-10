@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+from matplotlib.legend import Legend
 import numpy as np
 
 BIN_SEC = 30.0
@@ -71,7 +72,9 @@ def _bin_valid_rates(
     return np.array(xs), np.array(ys)
 
 
-def build_timeline_figure(rows: list[dict], subj: str = ""):
+def build_timeline_figure(
+    rows: list[dict], subj: str = ""
+) -> tuple[plt.Figure, plt.Text, Legend]:
     """从 seg 行构造时间轴 Figure（不落盘），返回 (fig, title_art, legend)。
 
     独立成函数便于测试直接断言标题文本、并用渲染器 bbox 验证标题与图例
@@ -104,7 +107,7 @@ def build_timeline_figure(rows: list[dict], subj: str = ""):
     if run:
         overall = sum(1 for r in run if r["valid"]) / len(run)
         title += f" — overall {overall:.1%} (running only, calibration excluded)"
-    # 水平分区：子图 ≤0.90，图例带 0.90–0.96，标题 ≥0.97，三者不重叠
+    # 水平分区：子图 ≤0.90，图例约 0.88–0.93，标题 ≥0.97，三者不重叠
     title_art = fig.suptitle(title, fontsize=11, y=0.985)
 
     handles = [
