@@ -1305,7 +1305,21 @@ def test_qc_short_run_meta_seg_summary_schema(data_root, tmp_path):
     run = json.loads((_run_dir(tmp_path) / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "ok"
     assert {"wall_started_iso", "wall_elapsed_s", "rate_ratio", "n_segments"} <= run.keys()
+    # FakeClock：10 次等待各 0.2s → 墙钟恰 2.0s；末段 ratio 在等待前取 = 2.0/1.8
+    assert run["n_segments"] == 10
+    assert run["wall_elapsed_s"] == 2.0
+    assert run["rate_ratio"] == 1.1111
     assert (_run_dir(tmp_path) / "valid_rate_timeline.png").exists()
+
+
+def test_qc_nonfinite_p2p_serialized_as_null(data_root, tmp_path):
+    # 非有限 p2p 必须落 null，不得写出裸 NaN/Infinity（严格 JSON 解析器会拒）
+    import math
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert qc_monitor._finite_or_none(bad) is None
+    assert qc_monitor._finite_or_none(37.5) == 37.5
+    assert qc_monitor._finite_or_none(None) is None
 
 
 def test_qc_jsonl_byte_deterministic_and_wall_free(data_root, tmp_path):
@@ -1333,8 +1347,12 @@ def test_qc_abort_writes_run_json_no_summary(data_root, tmp_path):
     rd = _run_dir(tmp_path, "x")
     rows = _read_jsonl(rd / "qc.jsonl")
     assert rows[-1]["type"] != "summary"
+    n_seg_written = sum(r["type"] == "seg" for r in rows)
+    assert n_seg_written == 3  # 第 3 段等待中被中断，3 行均已落盘
     run = json.loads((rd / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "aborted"
+    # 清单计数必须与 jsonl 实际 seg 行数一致（曾在 wait 后计数导致少 1）
+    assert run["n_segments"] == n_seg_written
     assert not (rd / "valid_rate_timeline.png").exists()  # 仅 ok 才出图
 
 
@@ -1405,6 +1423,7 @@ C5：无效段只打标并记录原因，绝不删除；反馈暂停是 IT4 的�
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -1419,8 +1438,16 @@ EOGS = config.EOG_PROXY_CHANNELS
 ALL_CH = (FZ, *EOGS)
 
 
+def _finite_or_none(v):
+    """非有限值（NaN/Inf）落盘为 null：裸 NaN/Infinity 不是合法 JSON token。"""
+    if v is None:
+        return None
+    return v if isinstance(v, (int, float)) and math.isfinite(v) else None
+
+
 def format_seg_line(
-    seg: int, t1: float, clean_p2p, eog_p2p, ratio: float, verdict: dict
+    seg: int, t1: float, clean_p2p: float | None, eog_p2p: float | None,
+    ratio: float, verdict: dict,
 ) -> str:
     color = pace.rate_color(ratio)
     if verdict["phase"] == "calibration":
@@ -1456,6 +1483,17 @@ def run_qc(
         fz_all.size, config.SEGMENT_SAMPLES, duration_sec
     )
 
+    # 参数回显放在建目录之前：若控制台编码连 µ 都打印不了（如 cp936 直调库），
+    # 应直接失败，不留空 run 目录（CLI 入口会先 reconfigure UTF-8）。
+    print(
+        f"[qc-monitor] sub-{subj} | 因果带通 "
+        f"{config.FILTER_BAND_HZ[0]:g}–{config.FILTER_BAND_HZ[1]:g}Hz | "
+        f"校准 {config.QC_CALIBRATION_SEC:g}s（预热剔除 {config.QC_FILTER_WARMUP_SEC:g}s）| "
+        f"L1 残差 p2p>{config.QC_L1_P2P_UV:g}µV | "
+        f"L3 EOG p2p>{config.QC_L3_EOG_P2P_UV:g}µV（{EOGS[0]}/{EOGS[1]} 任一）| "
+        f"段 {config.SEGMENT_SEC:g}s"
+    )
+
     run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = Path(out_root) / "qc" / f"sub-{subj}" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1467,15 +1505,6 @@ def run_qc(
     band = causal_filter.CausalBandpass(ALL_CH)
     judge = qc.QcJudge()
 
-    print(
-        f"[qc-monitor] sub-{subj} | 因果带通 "
-        f"{config.FILTER_BAND_HZ[0]:g}–{config.FILTER_BAND_HZ[1]:g}Hz | "
-        f"校准 {config.QC_CALIBRATION_SEC:g}s（预热剔除 {config.QC_FILTER_WARMUP_SEC:g}s）| "
-        f"L1 残差 p2p>{config.QC_L1_P2P_UV:g}µV | "
-        f"L3 EOG p2p>{config.QC_L3_EOG_P2P_UV:g}µV（{EOGS[0]}/{EOGS[1]} 任一）| "
-        f"段 {config.SEGMENT_SEC:g}s"
-    )
-
     counters = {
         "n_running": 0, "n_valid": 0, "n_invalid": 0,
         "n_l1": 0, "n_l3": 0, "n_l1_and_l3": 0,
@@ -1485,7 +1514,8 @@ def run_qc(
     n_emitted = 0
     jsonl_path = run_dir / "qc.jsonl"
 
-    with open(jsonl_path, "w", encoding="utf-8") as f:
+    # newline="\n"：锁 LF，避免 Windows 文本模式把字节产物翻成 CRLF（A4 跨机一致）
+    with open(jsonl_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps({
             "type": "meta",
             "schema_version": SCHEMA_VERSION,
@@ -1524,11 +1554,14 @@ def run_qc(
                     "t0": seg.t0,
                     "t1": seg.t1,
                     "phase": verdict["phase"],
-                    "fz_clean_p2p": verdict["fz_clean_p2p"],
-                    "eog_p2p": verdict["eog_p2p"],
+                    "fz_clean_p2p": _finite_or_none(verdict["fz_clean_p2p"]),
+                    "eog_p2p": _finite_or_none(verdict["eog_p2p"]),
                     "valid": verdict["valid"],
                     "reasons": verdict["reasons"],
                 }, ensure_ascii=False) + "\n")
+                # seg 行落盘即计数：Ctrl-C 几乎总落在随后的 wait 窗口，
+                # 在 wait 后计数会让 abort 清单系统性少 1。
+                n_emitted += 1
 
                 if verdict["phase"] == "running":
                     counters["n_running"] += 1
@@ -1554,9 +1587,10 @@ def run_qc(
                 ))
 
                 pacer.wait_after_segment(seg.seg)
-                n_emitted += 1
         except KeyboardInterrupt:
             status = "aborted"
+        # 有意只收 KeyboardInterrupt：其他异常硬抛出，不留 status=ok 的假清单
+        # （与 IT1 同构）。
 
         if status == "ok":
             valid_rate = (
@@ -1569,6 +1603,14 @@ def run_qc(
                 "valid_rate": valid_rate,
             }, ensure_ascii=False) + "\n")
 
+    if status == "ok":
+        # 出图在清单之前：绘图失败则硬抛、无 run.json，绝不出现
+        # status=ok 清单与缺失 PNG 自相矛盾的产物目录。
+        qc_timeline.plot_timeline(
+            jsonl_path, run_dir / "valid_rate_timeline.png", subj=subj
+        )
+
+    # run.json 最后写：它是本次运行的收尾清单（也是唯一墙钟载体）
     run_json = {
         "subj": subj,
         "status": status,
@@ -1580,18 +1622,15 @@ def run_qc(
     (run_dir / "run.json").write_text(
         json.dumps(run_json, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    if status == "ok":
-        qc_timeline.plot_timeline(
-            jsonl_path, run_dir / "valid_rate_timeline.png", subj=subj
-        )
     return status
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_qc_monitor.py -v`
-Expected: PASS（5 个；最后一个为真数据结构验收，假时钟瞬时完成，不对有效率做断言）
+Expected: PASS（6 个；含真数据结构验收，假时钟瞬时完成，不对有效率做断言）
+
+> **质量评审修订（2026-09-10）**：① abort 时 run.json `n_segments` 曾系统性少 1（计数在 wait 后），已把计数前移到 seg 行落盘后，并要求 run.json 计数 == jsonl seg 行数；同源缺陷在 IT1 `replay/monitor.py` 同样存在，一并前移修复，并在 tests/test_monitor.py 的 abort 用例补 `run["n_segments"] == seg 行数` 断言；monitor.py 的 jsonl 同时加 `newline="\n"` 锁 LF。② 非有限 p2p 写 null（`_finite_or_none`），不产出裸 NaN/Infinity。③ 出图先于 run.json，避免清单与 PNG 矛盾。④ 参数回显移到 mkdir 前。
 
 - [ ] **Step 5: 全量回归**
 
