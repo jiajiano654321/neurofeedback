@@ -75,16 +75,16 @@ class QcJudge:
         fz_name: str = config.TARGET.channel,
         eog_names: tuple[str, str] = config.EOG_PROXY_CHANNELS,
     ):
+        sfreq = float(sfreq)
         self.calibration_sec = float(calibration_sec)
         self.warmup_sec = float(warmup_sec)
-        self.sfreq = float(sfreq)
         self.l1_thr = float(l1_thr)
         self.l3_thr = float(l3_thr)
         self.fz_name = fz_name
         self.eog_names = tuple(eog_names)
 
-        self.calib_samples = int(round(self.calibration_sec * self.sfreq))
-        self.warmup_samples = int(round(self.warmup_sec * self.sfreq))
+        self.calib_samples = int(round(self.calibration_sec * sfreq))
+        self.warmup_samples = int(round(self.warmup_sec * sfreq))
         self._names = (self.fz_name, *self.eog_names)
         self._buf = {c: [] for c in self._names}
         self._n_accum = 0
@@ -103,7 +103,11 @@ class QcJudge:
         }
 
     def push(self, t1: float, filtered: dict[str, np.ndarray]) -> dict:
-        """t1=本段结束的数据时间（秒）；filtered 含 Fz/FP1/FP2 三路本段样本。"""
+        """t1=本段结束的数据时间（秒）；filtered 含 Fz/FP1/FP2 三路本段样本。
+
+        前置条件：各通道块等长、非空、一维（上游 CausalBandpass / iter_segments 保证），
+        judge 不重复校验形状。
+        """
         if self.frozen:
             return self._running_verdict(filtered)
 
@@ -119,7 +123,10 @@ class QcJudge:
         return verdict
 
     def _freeze(self, t1: float) -> None:
-        arrs = {c: np.concatenate(self._buf[c]) for c in self._names}
+        arrs = {
+            c: np.concatenate(self._buf[c])[: self.calib_samples]
+            for c in self._names
+        }
         b1, b2 = fit_eog_coeffs(
             arrs[self.fz_name],
             arrs[self.eog_names[0]],
@@ -145,7 +152,10 @@ class QcJudge:
 
         clean = fz - self.b_fp1 * fp1 - self.b_fp2 * fp2
         clean_p2p = p2p_uv(clean)
-        eog_p2p = max(p2p_uv(fp1), p2p_uv(fp2))  # 两路取大
+        # 两路取大必须用 np.maximum：内建 max 遇 NaN 有顺序依赖
+        # （max(nan,0)=nan 但 max(0,nan)=0），会让 FP2 一路 NaN 时漏判 L3
+        # 还把 eog_p2p 记成 0。np.maximum 任一为 NaN 都传 NaN，两路对称。
+        eog_p2p = float(np.maximum(p2p_uv(fp1), p2p_uv(fp2)))
         # 用 not(<=) 而非 (>)：非有限（NaN）段也判命中，绝不把坏段静默标成有效。
         hit_l1 = not (clean_p2p <= self.l1_thr)
         hit_l3 = not (eog_p2p <= self.l3_thr)

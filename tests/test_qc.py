@@ -175,6 +175,15 @@ def test_judge_nan_segment_is_never_marked_valid():
     })
     assert v["valid"] is False and v["reasons"] == ["L1"]
 
+    # 任一 EOG 通道单独 NaN（两个方向都测）：内建 max 的 NaN 顺序坑不得漏判 L3，
+    # 且 eog_p2p 必须是 NaN 而不是 0（不许掩盖坏通道，C5）
+    zero = np.zeros(50)
+    v_fp1 = judge.push(120.6, {"Fz": zero, "FP1": np.full(50, np.nan), "FP2": zero})
+    v_fp2 = judge.push(120.8, {"Fz": zero, "FP1": zero, "FP2": np.full(50, np.nan)})
+    for vx in (v_fp1, v_fp2):
+        assert vx["valid"] is False and set(vx["reasons"]) == {"L1", "L3"}
+        assert np.isnan(vx["eog_p2p"])
+
 
 def test_judge_short_run_never_freezes():
     # 数据短于 120s：全程 calibration，无 calib，无异常
@@ -214,3 +223,28 @@ def test_judge_warmup_excludes_startup_transient():
     assert judge.frozen
     assert abs(v["calib"]["b_fp1"] - 0.40) < 0.05
     assert v["calib"]["n_fit_samples"] == 125
+
+
+def test_judge_overshooting_blocks_fit_exactly_calib_samples():
+    """块长不整除校准窗（30 不整除 100）：跨边界冻结时只拟合前 100 点，
+    calib 记录的样本数/系数必须与「恰好前 100 点」一致，不许夸大到 120。"""
+    rng = np.random.default_rng(11)
+    sf, cal, warm, blk = 250.0, 0.4, 0.0, 30
+    cal_n = int(cal * sf)  # 100
+    n = 150
+    fp1 = rng.standard_normal(n) * 30.0
+    fp2 = rng.standard_normal(n) * 25.0
+    fz = 0.30 * fp1 + 0.50 * fp2 + rng.standard_normal(n) * 5.0
+    arrs = {"Fz": fz, "FP1": fp1, "FP2": fp2}
+    judge = qc.QcJudge(calibration_sec=cal, warmup_sec=warm, sfreq=sf)
+    v = None
+    for s in range(0, n, blk):
+        e = min(s + blk, n)
+        v = judge.push(e / sf, {c: a[s:e] for c, a in arrs.items()})
+        if judge.frozen:
+            break
+    assert judge.frozen
+    assert v["calib"]["n_fit_samples"] == cal_n
+    b1, b2 = qc.fit_eog_coeffs(fz[:cal_n], fp1[:cal_n], fp2[:cal_n], 0)
+    assert v["calib"]["b_fp1"] == pytest.approx(b1)
+    assert v["calib"]["b_fp2"] == pytest.approx(b2)
