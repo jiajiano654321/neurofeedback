@@ -95,7 +95,7 @@ def run_replay(
     last_ratio = 1.0
     n_emitted = 0
 
-    with open(jsonl_path, "w", encoding="utf-8") as f:
+    with open(jsonl_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps({
             "type": "meta",
             "schema_version": SCHEMA_VERSION,
@@ -131,10 +131,12 @@ def run_replay(
                 p2p = float(seg.samples.max() - seg.samples.min())
                 ratio = pacer.rate_ratio(seg.t1)
                 last_ratio = ratio
+                # 计数必须在 wait 之前：Ctrl-C 几乎总落在 wait 窗口，
+                # jsonl 已写入的段数必须与 run.json n_segments 一致。
+                n_emitted += 1
                 print(format_seg_line(seg.seg, seg.t1, p2p, ratio, _event_marks(evs)))
 
                 pacer.wait_after_segment(seg.seg)
-                n_emitted += 1
         except KeyboardInterrupt:
             status = "aborted"
 

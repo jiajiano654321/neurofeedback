@@ -72,6 +72,9 @@ def test_qc_short_run_meta_seg_summary_schema(data_root, tmp_path):
     run = json.loads((_run_dir(tmp_path) / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "ok"
     assert {"wall_started_iso", "wall_elapsed_s", "rate_ratio", "n_segments"} <= run.keys()
+    assert run["n_segments"] == 10
+    assert run["wall_elapsed_s"] == 2.0
+    assert run["rate_ratio"] == 1.1111  # 末段 ratio 在等待前取：2.0/1.8
     assert (_run_dir(tmp_path) / "valid_rate_timeline.png").exists()
 
 
@@ -103,6 +106,9 @@ def test_qc_abort_writes_run_json_no_summary(data_root, tmp_path):
     run = json.loads((rd / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "aborted"
     assert not (rd / "valid_rate_timeline.png").exists()  # 仅 ok 才出图
+    n_seg_written = sum(r["type"] == "seg" for r in rows)
+    assert n_seg_written == 3  # 第 3 段等待中被中断，3 行均已落盘
+    assert run["n_segments"] == n_seg_written
 
 
 def test_qc_preflight_failure_writes_nothing(data_root, tmp_path):
@@ -111,6 +117,19 @@ def test_qc_preflight_failure_writes_nothing(data_root, tmp_path):
     with pytest.raises(FileNotFoundError):
         qc_monitor.run_qc("999", root=data_root, out_root=tmp_path, run_id="z")
     assert not (tmp_path / "qc").exists()
+
+
+def test_qc_nonfinite_p2p_serialized_as_null():
+    """_finite_or_none：NaN/Inf 落盘为 null，正常值原样返回，None 透传。"""
+    import math
+
+    from bci_sys.replay.qc_monitor import _finite_or_none
+
+    assert _finite_or_none(float("nan")) is None
+    assert _finite_or_none(float("inf")) is None
+    assert _finite_or_none(float("-inf")) is None
+    assert _finite_or_none(37.5) == 37.5
+    assert _finite_or_none(None) is None
 
 
 def test_qc_real_data_130s_freeze_and_counters(data_root, tmp_path):

@@ -98,6 +98,7 @@ def test_abort_writes_run_json_and_no_summary(data_root, tmp_path):
     assert rows[-1]["type"] != "summary"
     run = json.loads((run_dir / "run.json").read_text())
     assert run["status"] == "aborted"
+    assert run["n_segments"] == sum(r["type"] == "seg" for r in rows) == 3
 
 
 def test_preflight_failure_writes_nothing(data_root, tmp_path):

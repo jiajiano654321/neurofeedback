@@ -7,6 +7,7 @@ C5：无效段只打标并记录原因，绝不删除；反馈暂停是 IT4 的�
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -21,8 +22,16 @@ EOGS = config.EOG_PROXY_CHANNELS
 ALL_CH = (FZ, *EOGS)
 
 
+def _finite_or_none(v):
+    """非有限值（NaN/Inf）落盘为 null：裸 NaN/Infinity 不是合法 JSON token。"""
+    if v is None:
+        return None
+    return v if isinstance(v, (int, float)) and math.isfinite(v) else None
+
+
 def format_seg_line(
-    seg: int, t1: float, clean_p2p, eog_p2p, ratio: float, verdict: dict
+    seg: int, t1: float, clean_p2p: float | None, eog_p2p: float | None,
+    ratio: float, verdict: dict,
 ) -> str:
     color = pace.rate_color(ratio)
     if verdict["phase"] == "calibration":
@@ -59,6 +68,17 @@ def run_qc(
     )
 
     run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # 参数回显放在 mkdir 之前：cp936 控制台 µ 编码崩溃时不留空目录
+    print(
+        f"[qc-monitor] sub-{subj} | 因果带通 "
+        f"{config.FILTER_BAND_HZ[0]:g}–{config.FILTER_BAND_HZ[1]:g}Hz | "
+        f"校准 {config.QC_CALIBRATION_SEC:g}s（预热剔除 {config.QC_FILTER_WARMUP_SEC:g}s）| "
+        f"L1 残差 p2p>{config.QC_L1_P2P_UV:g}µV | "
+        f"L3 EOG p2p>{config.QC_L3_EOG_P2P_UV:g}µV（{EOGS[0]}/{EOGS[1]} 任一）| "
+        f"段 {config.SEGMENT_SEC:g}s"
+    )
+
     run_dir = Path(out_root) / "qc" / f"sub-{subj}" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -69,15 +89,6 @@ def run_qc(
     band = causal_filter.CausalBandpass(ALL_CH)
     judge = qc.QcJudge()
 
-    print(
-        f"[qc-monitor] sub-{subj} | 因果带通 "
-        f"{config.FILTER_BAND_HZ[0]:g}–{config.FILTER_BAND_HZ[1]:g}Hz | "
-        f"校准 {config.QC_CALIBRATION_SEC:g}s（预热剔除 {config.QC_FILTER_WARMUP_SEC:g}s）| "
-        f"L1 残差 p2p>{config.QC_L1_P2P_UV:g}µV | "
-        f"L3 EOG p2p>{config.QC_L3_EOG_P2P_UV:g}µV（{EOGS[0]}/{EOGS[1]} 任一）| "
-        f"段 {config.SEGMENT_SEC:g}s"
-    )
-
     counters = {
         "n_running": 0, "n_valid": 0, "n_invalid": 0,
         "n_l1": 0, "n_l3": 0, "n_l1_and_l3": 0,
@@ -87,7 +98,7 @@ def run_qc(
     n_emitted = 0
     jsonl_path = run_dir / "qc.jsonl"
 
-    with open(jsonl_path, "w", encoding="utf-8") as f:
+    with open(jsonl_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps({
             "type": "meta",
             "schema_version": SCHEMA_VERSION,
@@ -126,11 +137,15 @@ def run_qc(
                     "t0": seg.t0,
                     "t1": seg.t1,
                     "phase": verdict["phase"],
-                    "fz_clean_p2p": verdict["fz_clean_p2p"],
-                    "eog_p2p": verdict["eog_p2p"],
+                    "fz_clean_p2p": _finite_or_none(verdict["fz_clean_p2p"]),
+                    "eog_p2p": _finite_or_none(verdict["eog_p2p"]),
                     "valid": verdict["valid"],
                     "reasons": verdict["reasons"],
                 }, ensure_ascii=False) + "\n")
+
+                # 计数必须在 wait 之前：Ctrl-C 几乎总落在 wait 窗口，
+                # jsonl 已写入的段数必须与 run.json n_segments 一致。
+                n_emitted += 1
 
                 if verdict["phase"] == "running":
                     counters["n_running"] += 1
@@ -156,7 +171,6 @@ def run_qc(
                 ))
 
                 pacer.wait_after_segment(seg.seg)
-                n_emitted += 1
         except KeyboardInterrupt:
             status = "aborted"
 
@@ -171,6 +185,13 @@ def run_qc(
                 "valid_rate": valid_rate,
             }, ensure_ascii=False) + "\n")
 
+    # 出图先于 run.json：绘图失败硬抛、无 run.json，
+    # 不留 status=ok 但缺 PNG 的矛盾目录。
+    if status == "ok":
+        qc_timeline.plot_timeline(
+            jsonl_path, run_dir / "valid_rate_timeline.png", subj=subj
+        )
+
     run_json = {
         "subj": subj,
         "status": status,
@@ -182,9 +203,4 @@ def run_qc(
     (run_dir / "run.json").write_text(
         json.dumps(run_json, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    if status == "ok":
-        qc_timeline.plot_timeline(
-            jsonl_path, run_dir / "valid_rate_timeline.png", subj=subj
-        )
     return status
