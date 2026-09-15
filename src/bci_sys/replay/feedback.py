@@ -91,6 +91,7 @@ class FeedbackSession:
         self.block_idx += 1
         if not (0 <= self.block_idx < self.n_blocks):
             raise RuntimeError(f"block 越界: {self.block_idx}")
+        self._cur = _Counts()
         self.seg_in_block = 0
         self._block_t1_start = float(t1)
         self.phase = "block"
@@ -153,6 +154,8 @@ class FeedbackSession:
         }
 
     def finish(self) -> dict:
+        if self.status is not None:
+            raise RuntimeError(f"会话已终态（status={self.status}），不能重复 finish")
         if self.blocks_completed != self.n_blocks:
             raise RuntimeError(
                 f"未完成全部 block 不能 finish：{self.blocks_completed}/{self.n_blocks}"

@@ -29,8 +29,9 @@ def test_segment_verdict_matches_frozen_judge(data_root):
         exp = judge.push((k + 1) * 0.2, {c: filtered[c][sl] for c in ("Fz", "FP1", "FP2")})
         assert got["valid"] == exp["valid"]
         assert got["reasons"] == exp["reasons"]
-        assert got["fz_clean_p2p"] == pytest.approx(exp["fz_clean_p2p"])
-        assert got["eog_p2p"] == pytest.approx(exp["eog_p2p"])
+        # 同源纯函数 + 同一份输入：必须位级相等，approx 会掩盖未来两条路径的漂移
+        assert got["fz_clean_p2p"] == exp["fz_clean_p2p"]
+        assert got["eog_p2p"] == exp["eog_p2p"]
 
 
 def _freeze_info(n=550, thr=16.7, rate=0.8, b1=0.248, b2=0.378):
@@ -101,7 +102,8 @@ def test_full_six_blocks_final_totals():
     for b in range(6):
         s.begin_block(120.0 + b * 120.0)
         for j in range(600):
-            s.record_segment(valid=(j != 7), power_finite=True, hit=(j % 3 == 0 and j != 7))
+            # 无效段恰为应命中段（6%3==0），锁死 C5"无效段不计 hit"
+            s.record_segment(valid=(j != 6), power_finite=True, hit=(j % 3 == 0 and j != 6))
         s.end_block_if_due(240.0 + b * 120.0)
         if b < 5:
             s.begin_rest(30.0)
@@ -109,7 +111,7 @@ def test_full_six_blocks_final_totals():
     final = s.finish()
     assert final["type"] == "final" and final["status"] == "ok"
     assert final["n_valid"] == 6 * 599 and final["n_invalid"] == 6
-    assert final["n_hit"] == sum(1 for j in range(600) if j % 3 == 0 and j != 7) * 6
+    assert final["n_hit"] == sum(1 for j in range(600) if j % 3 == 0 and j != 6) * 6
     assert len(final["block_rates"]) == 6
     assert final["overall_hit_rate"] == round(final["n_hit"] / final["n_valid"], 6)
     assert s.phase == "finished"
