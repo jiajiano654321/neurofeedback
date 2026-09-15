@@ -151,8 +151,8 @@ def test_theta_stream_default_zi_is_zero():
     x = rng.standard_normal(50 * 3) * 20.0
     stream = tm.ThetaStream()
     ys = [stream.push_segment(x[s:s + 50])[0] for s in range(0, x.size, 50)]
-    np.testing.assert_allclose(
+    # 默认 zi=None 等价零初始态：逐块拼接与一次性单向滤波逐点相等（实测 max diff 0.0）
+    np.testing.assert_array_equal(
         np.concatenate(ys),
         causal_filter.bandpass_oneshot(x, band_hz=config.THETA_BAND_HZ),
-        atol=1e-12,
     )

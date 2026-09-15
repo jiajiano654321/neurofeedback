@@ -68,6 +68,8 @@ class HitDecider:
         self.direction = direction
 
     def hit(self, smoothed_uV2: float) -> bool:
+        """调用契约：s 必须有限；smoothed 为 None（未成熟/无效段，C5）时调用方
+        必须直接跳过本方法——该段不产生达标判定，而不是把 None 传进来。"""
         if self.direction == "up":
             return bool(smoothed_uV2 >= self.threshold_uV2)
         return bool(smoothed_uV2 <= self.threshold_uV2)
