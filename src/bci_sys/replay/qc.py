@@ -55,6 +55,38 @@ def fit_eog_coeffs(fz_f, fp1_f, fp2_f, start_sample: int) -> tuple[float, float]
     return float(b[0]), float(b[1])
 
 
+def segment_verdict(
+    fz_f, fp1_f, fp2_f, b_fp1: float, b_fp2: float,
+    l1_thr: float, l3_thr: float,
+) -> dict:
+    """冻结后单段 L1/L3 裁决（纯函数；QcJudge 运行期与 IT4 校准重建共用，保证同源）。
+
+    返回 fz_clean_p2p / eog_p2p / valid / reasons（不含 phase）。
+    """
+    fz = np.asarray(fz_f, dtype=float)
+    fp1 = np.asarray(fp1_f, dtype=float)
+    fp2 = np.asarray(fp2_f, dtype=float)
+
+    clean = fz - b_fp1 * fp1 - b_fp2 * fp2
+    clean_p2p = p2p_uv(clean)
+    # 两路取大必须用 np.maximum：内建 max 遇 NaN 有顺序依赖（见 QcJudge 旧注）。
+    eog_p2p = float(np.maximum(p2p_uv(fp1), p2p_uv(fp2)))
+    # 用 not(<=) 而非 (>)：NaN 段也判命中，绝不把坏段静默标成有效。
+    hit_l1 = not (clean_p2p <= l1_thr)
+    hit_l3 = not (eog_p2p <= l3_thr)
+    reasons = []
+    if hit_l1:
+        reasons.append("L1")
+    if hit_l3:
+        reasons.append("L3")
+    return {
+        "fz_clean_p2p": clean_p2p,
+        "eog_p2p": eog_p2p,
+        "valid": not (hit_l1 or hit_l3),
+        "reasons": reasons,
+    }
+
+
 class QcJudge:
     """校准→运行状态机。逐段喂入【已因果带通】的三路等长块。
 
@@ -146,28 +178,12 @@ class QcJudge:
         self._buf = {}  # 校准原始缓冲不再需要
 
     def _running_verdict(self, filtered: dict[str, np.ndarray]) -> dict:
-        fz = np.asarray(filtered[self.fz_name], dtype=float)
-        fp1 = np.asarray(filtered[self.eog_names[0]], dtype=float)
-        fp2 = np.asarray(filtered[self.eog_names[1]], dtype=float)
-
-        clean = fz - self.b_fp1 * fp1 - self.b_fp2 * fp2
-        clean_p2p = p2p_uv(clean)
-        # 两路取大必须用 np.maximum：内建 max 遇 NaN 有顺序依赖
-        # （max(nan,0)=nan 但 max(0,nan)=0），会让 FP2 一路 NaN 时漏判 L3
-        # 还把 eog_p2p 记成 0。np.maximum 任一为 NaN 都传 NaN，两路对称。
-        eog_p2p = float(np.maximum(p2p_uv(fp1), p2p_uv(fp2)))
-        # 用 not(<=) 而非 (>)：非有限（NaN）段也判命中，绝不把坏段静默标成有效。
-        hit_l1 = not (clean_p2p <= self.l1_thr)
-        hit_l3 = not (eog_p2p <= self.l3_thr)
-        reasons = []
-        if hit_l1:
-            reasons.append("L1")
-        if hit_l3:
-            reasons.append("L3")
         return {
             "phase": "running",
-            "fz_clean_p2p": clean_p2p,
-            "eog_p2p": eog_p2p,
-            "valid": not (hit_l1 or hit_l3),
-            "reasons": reasons,
+            **segment_verdict(
+                filtered[self.fz_name],
+                filtered[self.eog_names[0]],
+                filtered[self.eog_names[1]],
+                self.b_fp1, self.b_fp2, self.l1_thr, self.l3_thr,
+            ),
         }
