@@ -82,7 +82,7 @@ Fz/FP1/FP2 ──因果1–30Hz(CausalBandpass, 跨段zi)──▶ QcJudge（冻
 
 ### 4.1 校准期（k=0…599，t1 0.2→120.0s）
 
-- 逐段推进三路 1–30Hz；引擎同时累积三路**滤波后**样本（list 拼接，约 30000×3×8B≈7.2MB 内存，测试断言常驻 < 10MB，不写盘）；QcJudge 处 calibration 相位（valid=null，不裁决，页面灰格）。
+- 逐段推进三路 1–30Hz；引擎同时累积三路**滤波后**样本（list 拼接，30000×3×8B=720,000B≈0.72MB 内存，测试断言常驻 < 10MB，不写盘）；QcJudge 处 calibration 相位（valid=null，不裁决，页面灰格）。
 - **θ 相关数值在校准期不存在**：live WS 只推 UI 帧 `calib_tick {k,t1}` 驱动灰格（该帧不落盘）；θ 功率在冻结瞬间重建后一次性补算（见 §4.2），600 条完整 `calib_seg` 数据行在 freeze 行之前写入 jsonl。replay 模式直接用 jsonl 的完整 `calib_seg` 行按 1x 时刻推帧（页面同样只取 k/t1 画灰格）。
 - 校准期中止：无 calib_seg 行、无 freeze，落 aborted（reason=user_abort）。
 

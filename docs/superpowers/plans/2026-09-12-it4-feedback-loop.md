@@ -36,7 +36,7 @@
 | n(E) | 约 491（探针 t1>11 口径）；引擎 t1>10 口径会略多 | 断言 ≥450 |
 | block 无效段数 | 43/41/57/71/85/108 | 与 θ 平滑无关，确定性，T9 核对 |
 | 会话墙钟 | ≈840+150+3=993s + 确认等待 | FakeClock 测试瞬时 |
-| 校准缓冲 | 3×30000×8B=7.2MB | <10MB（spec §4.1） |
+| 校准缓冲 | 3×30000×8B=720,000B≈0.72MB | <10MB（spec §4.1） |
 
 ## 0.2 File Structure
 
@@ -1554,9 +1554,10 @@ def test_finite_or_none_guard():
 
 
 def test_calibration_buffer_footprint_under_10mb():
-    # spec §4.1：三路 30000 float64 常驻校准缓冲上限
-    assert 3 * int(config.QC_CALIBRATION_SEC * config.SFREQ) * 8 == 7_200_000
-    assert 3 * int(config.QC_CALIBRATION_SEC * config.SFREQ) * 8 < 10_000_000
+    # spec §4.1：三路 30000 float64 校准缓冲 = 720,000B ≈ 0.72MB，上限 < 10MB
+    n_bytes = 3 * int(config.QC_CALIBRATION_SEC * config.SFREQ) * 8
+    assert n_bytes == 720_000
+    assert n_bytes < 10_000_000
 
 
 def test_independent_recompute_matches_jsonl(data_root, tmp_path):
@@ -1937,7 +1938,7 @@ def run_feedback(
                     }
                     f.write(json.dumps(freeze_row, ensure_ascii=False) + "\n")
                     f.flush()
-                    cal_buf = None  # 释放 ~7.2MB 校准缓冲
+                    cal_buf = None  # 释放 ~0.72MB（720KB）校准缓冲
                     theta_stream = theta_metric.ThetaStream(zf=fr["zf"])
                     decider = theta_metric.HitDecider(
                         fr["theta_thr_uV2"], config.TARGET.direction)
