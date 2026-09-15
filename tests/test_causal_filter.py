@@ -87,9 +87,9 @@ def test_2d_or_mismatched_block_raises_before_state_change():
     f = cf.CausalBandpass(["Fz", "FP1"])
     good = rng.standard_normal(50)
     f.push_block({"Fz": good, "FP1": good})  # 先推进一个正常块建立状态
-    hp_zi_before = f._hp["Fz"].zi.copy()
+    hp_zi_before = f._ch["Fz"].hp.zi.copy()
     with pytest.raises(ValueError):
         f.push_block({"Fz": good, "FP1": good.reshape(25, 2)})  # 等 size 但二维
     with pytest.raises(ValueError):
         f.push_block({"Fz": good, "FP1": good[:10]})            # 长度不等
-    np.testing.assert_array_equal(f._hp["Fz"].zi, hp_zi_before)  # 状态未被污染
+    np.testing.assert_array_equal(f._ch["Fz"].hp.zi, hp_zi_before)  # 状态未被污染
