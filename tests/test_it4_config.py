@@ -34,3 +34,4 @@ def test_it4_segment_counts():
     assert per_block == 600
     assert config.FEEDBACK_N_BLOCKS * per_block == 3600
     assert config.QC_CALIBRATION_SEC + config.FEEDBACK_N_BLOCKS * config.FEEDBACK_BLOCK_SEC == 840.0
+    assert config.THETA_TARGET_RATE + config.THETA_QUANTILE == 1.0

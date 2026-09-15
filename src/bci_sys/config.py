@@ -41,11 +41,11 @@ THETA_SMOOTH_SEGS = 5        # 仅有效段尾窗（1s）
 THETA_QUANTILE = 0.20        # S3 阈值分位（numpy linear）
 THETA_TARGET_RATE = 0.80     # 设计目标达标率（=1−分位）；仅冻结时使用，不参与运行期控制
 THETA_MIN_CALIB_SEGS = 50    # 冻结所需最小合格成熟校准段
-FEEDBACK_N_BLOCKS = 6
-FEEDBACK_BLOCK_SEC = 120.0
-FEEDBACK_REST_SEC = 30.0
-FEEDBACK_FREEZE_CARD_SEC = 3.0
-SESSION_WALL_CAP_SEC = 1500.0
+FEEDBACK_N_BLOCKS = 6            # S4 block 数
+FEEDBACK_BLOCK_SEC = 120.0      # 每 block 数据钟秒数（600 段）
+FEEDBACK_REST_SEC = 30.0        # block 间休息（纯墙钟，数据钟暂停）
+FEEDBACK_FREEZE_CARD_SEC = 3.0  # 冻结卡纯墙钟展示时长
+SESSION_WALL_CAP_SEC = 1500.0   # 会话墙钟硬上限（25min 兜底）
 
 
 @dataclass(frozen=True)
