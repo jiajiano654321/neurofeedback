@@ -9,10 +9,16 @@ dependencies = [
     "scipy",
     "pandas",
     "matplotlib",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "httpx>=0.27",
+    "pytest",
+    "wsproto>=1.2",
+]
 
 [project.scripts]
 replay-monitor = "bci_sys.replay.cli:main"
