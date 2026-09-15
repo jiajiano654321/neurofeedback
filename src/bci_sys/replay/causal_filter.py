@@ -21,7 +21,7 @@ def design_filter_coeffs(
     sfreq: float = config.SFREQ,
     band_hz: tuple[float, float] = config.FILTER_BAND_HZ,
 ):
-    """返回 ((b_hp, a_hp), (b_lp, a_lp))。"""
+    """返回 ((b_hp, a_hp), (b_lp, a_lp))。默认 band_hz 取自 config.FILTER_BAND_HZ（频带冻结 1–30Hz，C2）。"""
     lo, hi = band_hz
     b_hp, a_hp = signal.butter(4, lo / (sfreq / 2.0), btype="high")
     b_lp, a_lp = signal.butter(4, hi / (sfreq / 2.0), btype="low")
@@ -65,6 +65,7 @@ class CausalChannel:
 
     zi=(zi_hp, zi_lp)，任一元素为 None 表示该节零初始。
     空块原样返回且不触碰 zi（scipy lfilter 对空输入会返回错误 zf）。
+    非线程安全：push 必须由单线程串行调用（引擎模型：唯一回放线程）。
     """
 
     def __init__(

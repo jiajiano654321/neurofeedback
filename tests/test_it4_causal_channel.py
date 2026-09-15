@@ -47,6 +47,8 @@ def test_bad_zi_length_raises_before_state_change():
     rng = np.random.default_rng(3)
     with pytest.raises(ValueError):
         cf.CausalChannel(zi=(np.zeros(2), np.zeros(4)))
+    with pytest.raises(ValueError):
+        cf.CausalChannel(zi=(np.zeros(4), np.zeros(2)))  # hp 合法、lp 非法，对称路径
     ch = cf.CausalChannel()
     good = rng.standard_normal(50)
     ch.push(good)
@@ -60,7 +62,10 @@ def test_empty_segment_preserves_zi():
     x = rng.standard_normal(50 * 4) * 20.0
     ch = cf.CausalChannel()
     ch.push(x[:50])
-    z_before = ch.states()[0].copy()
+    zh0, zl0 = ch.states()
+    zh0, zl0 = zh0.copy(), zl0.copy()
     out_empty = ch.push(np.empty(0))
     assert out_empty.size == 0
-    np.testing.assert_array_equal(ch.states()[0], z_before)
+    zh1, zl1 = ch.states()
+    np.testing.assert_array_equal(zh1, zh0)
+    np.testing.assert_array_equal(zl1, zl0)
