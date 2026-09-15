@@ -36,6 +36,17 @@ QC_FILTER_WARMUP_SEC = 10.0     # 估 EOG 回归系数时剔除的滤波器启�
 QC_L1_P2P_UV = 100.0            # L1：去眼电后 Fz 残差 200ms 峰峰值上限
 QC_L3_EOG_P2P_UV = 200.0        # L3：FP1/FP2 任一路 200ms 峰峰值上限（否决项）
 
+# --- IT4 反馈会话（冻结，C2：运行期无修改入口） ---
+THETA_SMOOTH_SEGS = 5        # 仅有效段尾窗（1s）
+THETA_QUANTILE = 0.20        # S3 阈值分位（numpy linear）
+THETA_TARGET_RATE = 0.80     # 设计目标达标率（=1−分位）；仅冻结时使用，不参与运行期控制
+THETA_MIN_CALIB_SEGS = 50    # 冻结所需最小合格成熟校准段
+FEEDBACK_N_BLOCKS = 6
+FEEDBACK_BLOCK_SEC = 120.0
+FEEDBACK_REST_SEC = 30.0
+FEEDBACK_FREEZE_CARD_SEC = 3.0
+SESSION_WALL_CAP_SEC = 1500.0
+
 
 @dataclass(frozen=True)
 class Target:
