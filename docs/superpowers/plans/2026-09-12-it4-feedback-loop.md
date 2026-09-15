@@ -499,13 +499,18 @@ def test_hit_decider_direction_required_and_validated():
 
 
 def _sine_clean(n_seg=600, freq=5.0, amp=10.0):
-    # 5Hz @250Hz：每 50 点段恰好 1 个整周期 → 稳态后逐段 mean(x²) 严格相等
-    t = np.arange(n_seg * 50) / config.SFREQ
-    return amp * np.sin(2 * np.pi * freq * t)
+    # 5Hz @250Hz：每 50 点恰好 1 个整周期；tile 一张周期表保证各段输入
+    # 【比特一致】（用全局角 np.sin(2π·5·n/250) 时大角度自变量带来 ~1e-10 抖动）。
+    # 但 4Hz 高通极点 |z|≈0.962、IIR 内部状态尺度大，稳态轨道仍带 ~1e-12
+    # 输出级舍入噪声，段功率不可能逐比特相等——用例只锁"相对一致的平台"。
+    per = int(round(config.SFREQ / freq))  # 5Hz → 50 点/周期
+    one = amp * np.sin(2 * np.pi * freq * np.arange(per) / config.SFREQ)
+    return np.tile(one, n_seg)
 
 
 def test_calibrate_constant_amplitude_locks_linear_quantile():
-    # 恒定幅值 5Hz 正弦 → 稳态段功率恒定；成熟期固定（前 10s=50 段剔除，窗 5 段成熟）
+    # 恒定幅值 5Hz 正弦 → 稳态段功率平台（IIR 舍入带造成 ~1e-12 相对展宽，
+    # 非比特相等）；成熟期固定：前 10s=50 段剔除，窗 5 段成熟。
     x = _sine_clean()
     valid = np.ones(600, dtype=bool)
     fr = tm.calibrate_theta(x, valid)
@@ -516,26 +521,30 @@ def test_calibrate_constant_amplitude_locks_linear_quantile():
     assert all(v is not None for v in fr["cal_smoothed"][50:])
     assert np.isfinite(fr["theta_thr_uV2"])
     assert fr["theta_thr_uV2"] > 0
-    # 平台值 ties：P20 阈值取自已排序平台，>= 阈值的比例为 1（允许 1 个浮点抖动值）
-    mature = np.asarray([s for s in fr["cal_smoothed"] if s is not None])
+    mature = np.asarray(fr["cal_smoothed"][50:], dtype=float)
+    # 平台锁：550 个成熟值相对展宽 < 1e-9（实测 ~2e-12），阈值即平台水平
+    assert np.ptp(mature) / float(np.median(mature)) < 1e-9
+    assert fr["theta_thr_uV2"] == pytest.approx(float(np.median(mature)), rel=1e-9)
+    # method="linear" 在相邻次序统计量间插值：即便 ulp 级展宽也无 ties，
+    # 达标率由分位秩决定 ≈0.80（不会是 1）——真实数据上的 P20 语义（spec §9）
     assert fr["calib_hit_rate"] == pytest.approx(
         float(np.mean(mature >= fr["theta_thr_uV2"])), rel=1e-12)
-    assert fr["calib_hit_rate"] >= 0.99
+    assert 0.79 <= fr["calib_hit_rate"] <= 0.81
     zf_hp, zf_lp = fr["zf"]
     assert zf_hp.shape == (4,) and zf_lp.shape == (4,)  # 4 阶节状态长度 4
 
 
 def test_calibrate_p20_linear_interpolation_locked():
-    # 600 段 5Hz 正弦（50 点=整周期）：前 50 段（t1<=10s）幅值 2（剔除），
-    # seg50–159 低幅 1（110 段），seg160–599 高幅 3（440 段）。
-    # 段边界总落在过零点，幅值切换无值跳变；通带稳态对每段输出严格周期，
-    # 故平台段功率严格相等，只有阶跃附近约 4 个 5 段窗均值是过渡值。
-    t = np.arange(600 * 50) / config.SFREQ
-    amp = np.empty(600 * 50)
-    for j in range(600):
-        a = 2.0 if j < 50 else (1.0 if j < 160 else 3.0)
-        amp[j * 50:(j + 1) * 50] = a
-    x = amp * np.sin(2 * np.pi * 5.0 * t)
+    # 600 段 5Hz 正弦（50 点=整周期，tile 周期表、段边界精确过零）：
+    # 前 50 段（t1<=10s）幅值 2（剔除），seg50–159 低幅 1（110 段），
+    # seg160–599 高幅 3（440 段）。
+    # 4Hz 高通极点 |z|≈0.962（每段仅衰减 0.146），阶跃后段功率需 ~9 段才沉入
+    # 1e-8 带，叠加 W=5 窗历史混合（4 段）：实测低侧 13 个、高侧 14 个过渡值。
+    per = 50
+    table = np.sin(2 * np.pi * 5.0 * np.arange(per) / config.SFREQ)
+    amps = np.array(
+        [2.0 if j < 50 else (1.0 if j < 160 else 3.0) for j in range(600)])
+    x = np.tile(table, 600) * np.repeat(amps, per)
     fr = tm.calibrate_theta(x, np.ones(600, dtype=bool))
     E = np.asarray([s for s in fr["cal_smoothed"] if s is not None])
     assert E.size == 550  # t1>10s 且窗成熟
@@ -550,11 +559,11 @@ def test_calibrate_p20_linear_interpolation_locked():
     assert 0.77 <= fr["calib_hit_rate"] <= 0.83
     assert fr["calib_hit_rate"] == pytest.approx(
         float(np.mean(E >= fr["theta_thr_uV2"])), rel=1e-12)
-    # 两个平台各自严格等值（5Hz 整周期段），过渡段只有边界附近少数几个
+    # 两平台各去掉实测十余个过渡值后严格相等（断言留裕度：>=90 / >=420）
     low_med = float(np.median(E[:120]))
     high_med = float(np.median(E[-440:]))
-    assert int(np.count_nonzero(np.abs(E - low_med) < 1e-8)) >= 100
-    assert int(np.count_nonzero(np.abs(E - high_med) < 1e-8)) >= 430
+    assert int(np.count_nonzero(np.abs(E - low_med) < 1e-8)) >= 90
+    assert int(np.count_nonzero(np.abs(E - high_med) < 1e-8)) >= 420
 
 
 def test_calibrate_too_few_mature_segments_raises():
@@ -598,10 +607,10 @@ def test_theta_stream_default_zi_is_zero():
     x = rng.standard_normal(50 * 3) * 20.0
     stream = tm.ThetaStream()
     ys = [stream.push_segment(x[s:s + 50])[0] for s in range(0, x.size, 50)]
-    np.testing.assert_allclose(
+    # 默认 zi=None 等价零初始态：逐块拼接与一次性单向滤波逐点相等（实测 max diff 0.0）
+    np.testing.assert_array_equal(
         np.concatenate(ys),
         causal_filter.bandpass_oneshot(x, band_hz=config.THETA_BAND_HZ),
-        atol=1e-12,
     )
 ```
 
@@ -685,6 +694,8 @@ class HitDecider:
         self.direction = direction
 
     def hit(self, smoothed_uV2: float) -> bool:
+        """调用契约：s 必须有限；smoothed 为 None（未成熟/无效段，C5）时调用方
+        必须直接跳过本方法——该段不产生达标判定，而不是把 None 传进来。"""
         if self.direction == "up":
             return bool(smoothed_uV2 >= self.threshold_uV2)
         return bool(smoothed_uV2 <= self.threshold_uV2)
