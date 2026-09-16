@@ -186,9 +186,9 @@ def run_feedback(
 
     run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     print(
-        f"[feedback-loop] sub-{subj} | S3 calibration {config.QC_CALIBRATION_SEC:g}s | "
-        f"S4 {config.FEEDBACK_N_BLOCKS}x{config.FEEDBACK_BLOCK_SEC:g}s "
-        f"rest {config.FEEDBACK_REST_SEC:g}s | theta {config.THETA_BAND_HZ[0]:g}-"
+        f"[feedback-loop] sub-{subj} | S3 校准 {config.QC_CALIBRATION_SEC:g}s | "
+        f"S4 {config.FEEDBACK_N_BLOCKS}×{config.FEEDBACK_BLOCK_SEC:g}s "
+        f"rest {config.FEEDBACK_REST_SEC:g}s | θ {config.THETA_BAND_HZ[0]:g}–"
         f"{config.THETA_BAND_HZ[1]:g}Hz W={config.THETA_SMOOTH_SEGS} "
         f"P{config.THETA_QUANTILE*100:g} direction={config.TARGET.direction}"
     )
@@ -327,8 +327,8 @@ def run_feedback(
                         "theta_thr": fr["theta_thr_uV2"],
                     })
                     bus.publish(freeze_row, snap)
-                    print(f"[freeze] b_{EOGS[0]}={b1:.4f} b_{EOGS[1]}={b2:.4f} "
-                          f"theta_thr={fr['theta_thr_uV2']:.2f} uV^2 "
+                    print(f"[冻结] b_{EOGS[0]}={b1:.4f} b_{EOGS[1]}={b2:.4f} "
+                          f"θ_thr={fr['theta_thr_uV2']:.2f}µV² "
                           f"n={fr['n_thr_segs']} hit_rate={fr['calib_hit_rate']:.3f}")
                     if not _interruptible_wait(
                         config.FEEDBACK_FREEZE_CARD_SEC, abort_event, sleep_fn):
