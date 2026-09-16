@@ -1277,6 +1277,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -1435,7 +1436,7 @@ def test_a4_byte_identical_two_runs(data_root, tmp_path):
         bs.append((tmp_path / rid / "feedback" / "sub-001" / "fixed" /
                    "feedback.jsonl").read_bytes())
     assert bs[0] == bs[1]
-    assert hashlib.sha256(bs[0]).hexdigest == hashlib.sha256(bs[1]).hexdigest
+    assert hashlib.sha256(bs[0]).hexdigest() == hashlib.sha256(bs[1]).hexdigest()
 
 
 def test_bus_frames_match_jsonl_rows_and_ticks_live_only(data_root, tmp_path):
@@ -1474,15 +1475,17 @@ def test_abort_preset_before_start(data_root, tmp_path):
 
 
 def test_abort_during_first_rest(data_root, tmp_path):
-    ev = threading.Event()
-    gate = GateClock(ev, lo=243.5)  # block0 后 30s rest 窗内
+    # GateClock 与 setter 必须操作 runner 自己的 abort Event（引擎只认它）；
+    # setter 轮询里 time.sleep 让出 GIL，否则忙等会饿死引擎线程。
     runner = eng.FeedbackRunner(subj="001", root=data_root, out_root=tmp_path, run_id="r")
+    gate = GateClock(runner.abort, lo=243.5)  # block0 后 30s rest 窗内
     # 先让引擎进 rest 再置 abort
     def setter():
         while runner.bus.snapshot is None or runner.bus.snapshot.get("phase") != "rest":
             if runner.outcome is not None:
                 return
-        ev.set()
+            time.sleep(0.001)
+        runner.abort.set()
     threading.Thread(target=setter, daemon=True).start()
     runner.start(sleep_fn=gate.sleep, clock=gate.now)
     runner.join(10.0)
