@@ -114,6 +114,7 @@ class EventBus:
                     pass
                 self.dropped += 1
                 try:
+                    # 当前持锁且 get 已腾出空位，单生产者下不可达，保留仅为防御
                     self.q.put_nowait(env)
                 except queue.Full:
                     pass
@@ -280,6 +281,8 @@ def run_feedback(
                 k += 1
 
                 if verdict.get("calib") is not None:
+                    # 此处 k 已自增，刚处理完的段号是 k-1（=599），
+                    # 冻结卡/终态行的段号与时标均用 k-1。
                     try:
                         fr = _compute_freeze(judge, cal_buf)
                         # note_freeze 二次守门（成熟段 <50 / 阈值非有限）

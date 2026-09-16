@@ -39,7 +39,8 @@ class GateClock:
     def sleep(self, dt):
         self.t += dt
         if self.lo < self.t < self.hi:
-            self.abort.wait(5.0)
+            # 正常毫秒级返回（abort 已 set 或 setter 很快置位）；30s 留 CI 高负载余量
+            self.abort.wait(30.0)
 
 
 def _rows(rd: Path):
@@ -266,6 +267,8 @@ def test_engine_error_unexpected_exception(data_root, tmp_path, monkeypatch, cap
     assert rows[-1]["error"] == "RuntimeError"
     run = json.loads((tmp_path / "feedback" / "sub-001" / "ee" / "run.json").read_text("utf-8"))
     assert run["reason"] == "engine_error"
+    captured = capsys.readouterr()
+    assert "RuntimeError" in captured.err
 
 
 def test_preflight_failure_writes_nothing(data_root, tmp_path):
