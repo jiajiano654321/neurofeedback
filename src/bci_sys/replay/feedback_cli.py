@@ -18,6 +18,27 @@ from . import webapp
 _ALL_CH = (config.TARGET.channel, *config.EOG_PROXY_CHANNELS)
 
 
+def _watch_runner_then_stop_server(server, runner) -> None:
+    """等 runner 真正 start（_t 被赋值）后再 join，结束后令 server 退出。
+
+    为什么要等 start：api_start 在 runner_factory 返回之后才调 runner.start()，
+    而 factory 里就起了 watch 守护线程。若 watch 在 start 前调 join，
+    FeedbackRunner.join 因 self._t is None 会**立即**返回 → 服务器还没开跑就被
+    should_exit 关掉 → CLI 兜底把 outcome 还 None 的 runner abort 掉，
+    引擎刚启动在 k=0 就落 user_abort（启动竞态，uvicorn 真实路径每次必现）。
+    """
+    # 轮询等 _t 被赋值（start() 才会做）；间隔 10ms，最多等 30s（极端慢启动兜底）
+    import time
+    for _ in range(3000):
+        if runner._t is not None:
+            break
+        time.sleep(0.01)
+    runner.join()
+    # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
+    # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
+    server.should_exit = True
+
+
 def _rc(status: str | None, reason: str | None) -> int:
     """spec §5.2 退出码映射。"""
     if status == "ok":
@@ -52,8 +73,10 @@ class _FaultRunner:
         self.abort = threading.Event()
         self.outcome = None
         self.run_dir = ""
+        self._t = None  # 与 FeedbackRunner 接口对齐：start 前为 None
 
     def start(self, **_k):
+        self._t = object()  # 标记已 start（watcher 轮询等的就是这个）
         self.outcome = {"status": "aborted", "reason": "engine_error",
                         "run_dir": self.run_dir}
 
@@ -103,12 +126,9 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
             # 测试注入快放时钟（生产路径两个都是 None → 真墙钟）
             r._sleep_fn, r._clock = _sleep_fn, _clock
         registry["r"] = r
-        def watch():
-            r.join()
-            # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
-            # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
-            server.should_exit = True
-        threading.Thread(target=watch, daemon=True).start()
+        threading.Thread(
+            target=_watch_runner_then_stop_server, args=(server, r), daemon=True,
+        ).start()
         return r
 
     app = webapp.create_app(subj=args.subj, data_root=args.data_root,

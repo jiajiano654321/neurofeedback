@@ -271,6 +271,22 @@ def test_engine_error_unexpected_exception(data_root, tmp_path, monkeypatch, cap
     assert "RuntimeError" in captured.err
 
 
+def test_runner_baseexception_lands_as_engine_error(data_root, tmp_path, monkeypatch):
+    """FeedbackRunner._target 必须捕获 BaseException（含 KeyboardInterrupt），
+    落 engine_error 终态，不能让线程悄悄死掉导致 watcher 误判正常结束。"""
+    def boom(*a, **k):
+        raise KeyboardInterrupt("simulated SIGINT inside engine")
+    monkeypatch.setattr(eng, "run_feedback", boom)
+    runner = eng.FeedbackRunner(subj="001", root=data_root, out_root=tmp_path, run_id="be")
+    runner.start()
+    runner.join(5.0)
+    assert not runner.alive, "引擎线程未在 5s 内结束"
+    assert runner.outcome is not None, "outcome 为 None —— 异常没被 _target 捕获"
+    assert runner.outcome["status"] == "aborted"
+    assert runner.outcome["reason"] == "engine_error"
+    assert runner.outcome["run_dir"] == runner.run_dir
+
+
 def test_preflight_failure_writes_nothing(data_root, tmp_path):
     with pytest.raises(FileNotFoundError):
         eng.run_feedback(subj="999", root=data_root, out_root=tmp_path, run_id="z")

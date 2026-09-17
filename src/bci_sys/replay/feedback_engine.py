@@ -543,7 +543,11 @@ class FeedbackRunner:
                 subj=self.subj, root=self.root, out_root=self.out_root,
                 run_id=self.run_id, abort_event=self.abort, bus=self.bus,
                 chans=self.chans, **kwargs)
-        except Exception:
+        except BaseException:
+            # 捕获 BaseException（含 KeyboardInterrupt / SystemExit）：
+            # 引擎线程不得静默死亡——否则 watcher 见 join 返回会误判正常结束，
+            # 然后服务器退出、CLI 兜底读 outcome is None 走无终态 rc=1。
+            # 统一落 engine_error 终态，不重新抛出（daemon 线程，抛了也只是 stderr 警告）。
             traceback.print_exc()
             self.outcome = {"status": "aborted", "reason": "engine_error",
                             "run_dir": self.run_dir}

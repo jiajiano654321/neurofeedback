@@ -139,3 +139,55 @@ def test_replay_rc0_and_writes_nothing(data_root, tmp_path):
 def test_bad_replay_path_rc2(tmp_path):
     rc = cli.run(["--replay", str(tmp_path / "nope.jsonl")], _server_cls=_ReplayServer)
     assert rc == 2
+
+
+def test_watch_runner_waits_for_start_before_joining():
+    """修复前竞态：watch 在 runner.start() 前就 join（_t is None → 立即返回），
+    导致 server.should_exit 被提前置 True，服务器还没开始就退出。
+    修复后 _watch_runner_then_stop_server 必须轮询等 _t 被赋值才 join。"""
+    import types
+
+    class StubRunner:
+        def __init__(self):
+            self._t = None
+            self._started = threading.Event()
+            self._done = threading.Event()
+
+        def start(self):
+            # 模拟 start() 给 _t 赋值（真实实现是起线程）
+            self._t = object()
+            self._started.set()
+
+        def join(self, timeout=None):
+            # 只有 _t 非 None 时才会阻塞等 done（和真实 join 行为一致）
+            if self._t is None:
+                return
+            self._done.wait(timeout)
+
+    runner = StubRunner()
+    server = types.SimpleNamespace(should_exit=False)
+
+    t = threading.Thread(target=cli._watch_runner_then_stop_server,
+                         args=(server, runner), daemon=True)
+    t.start()
+
+    # start() 之前：watcher 必须卡在轮询，绝不置 should_exit
+    # 旧实现（watch 直接 join）会在这里立即置 True → 红相
+    import time
+    time.sleep(0.05)
+    assert server.should_exit is False, (
+        "watcher 在 runner.start() 前就置了 should_exit —— 启动竞态未修复")
+
+    # 现在真正 start，再释放 join
+    runner.start()
+    runner._done.set()
+
+    # 2s 内轮询 should_exit 变 True
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if server.should_exit:
+            break
+        time.sleep(0.01)
+    assert server.should_exit is True, "watcher 结束后未置 should_exit"
+    t.join(timeout=1)
+    assert not t.is_alive()
