@@ -24,6 +24,7 @@ dev = [
 replay-monitor = "bci_sys.replay.cli:main"
 qc-monitor = "bci_sys.replay.qc_cli:main"
 theta-probe = "bci_sys.offline.cli:main"
+feedback-loop = "bci_sys.replay.feedback_cli:main"
 
 [build-system]
 requires = ["hatchling"]

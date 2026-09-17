@@ -1,0 +1,132 @@
+"""IT4 CLI：argparse/help、rc 映射、preflight 先于服务器、快放全跑 rc=0、
+abort=130、截断=3、engine_error=1、replay 只读零写入。"""
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from bci_sys import io_bids
+from bci_sys.replay import feedback_cli as cli
+from bci_sys.replay import feedback_engine as eng
+
+
+class FakeClock:
+    def __init__(self): self.t = 0.0
+    def now(self): return self.t
+    def sleep(self, dt): self.t += dt
+
+
+class _Server:
+    """替身：不绑端口，用 TestClient 完成 POST /api/start 后等引擎收尾。"""
+    def __init__(self, app, port, action=None):
+        self.app, self.port, self.action = app, port, action
+
+    def run(self):
+        with TestClient(self.app) as c:
+            r = c.post("/api/start")
+            assert r.status_code == 200, r.text
+            runner = self.app.state.runner
+            if self.action == "abort":
+                runner.abort.set()
+            runner.join(30)
+
+
+class _ReplayServer:
+    def __init__(self, app, port, **k): self.app = app
+    def run(self):
+        with TestClient(self.app) as c:
+            info = c.get("/api/run").json()
+            r = c.get(f"/api/replay?file={info['replay_file']}")
+            assert r.status_code == 200 and r.json()["frames"]
+
+
+def _live_args(tmp, data_root):
+    return ["--subj", "001", "--data-root", str(data_root), "--out-dir", str(tmp)]
+
+
+def test_help_subprocess():
+    r = subprocess.run([sys.executable, "-m", "bci_sys.replay.feedback_cli", "--help"],
+                       capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert r.returncode == 0
+    assert "feedback-loop" in r.stdout and "--replay" in r.stdout and "--port" in r.stdout
+
+
+def test_bad_subj_rc2_before_server_and_zero_artifacts(tmp_path, data_root):
+    before = sorted(p.name for p in tmp_path.glob("**/*"))
+    r = subprocess.run(
+        [sys.executable, "-m", "bci_sys.replay.feedback_cli",
+         "--subj", "999", "--data-root", str(data_root), "--out-dir", str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert r.returncode == 2
+    assert "PREFLIGHT FAIL" in r.stderr
+    assert not (tmp_path / "feedback").exists()
+    assert sorted(p.name for p in tmp_path.glob("**/*")) == before
+
+
+def test_rc_map():
+    assert cli._rc("ok", None) == 0
+    assert cli._rc("aborted", "user_abort") == 130
+    for reason in ("incomplete_data", "wall_cap", "freeze_failed"):
+        assert cli._rc("aborted", reason) == 3
+    assert cli._rc("aborted", "engine_error") == 1
+    assert cli._rc(None, None) == 1  # 无终态（被强杀兜底）
+
+
+def test_live_full_run_rc0(data_root, tmp_path, capsys):
+    clk = FakeClock()
+    rc = cli.run(_live_args(tmp_path, data_root),
+                 _server_cls=_Server, _sleep_fn=clk.sleep, _clock=clk.now)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:" in out  # spec §6：只绑本机且终端打印 URL
+    runs = list((tmp_path / "feedback" / "sub-001").iterdir())
+    rd = runs[0]
+    run = __import__("json").loads((rd / "run.json").read_text("utf-8"))
+    assert run["status"] == "ok" and run["n_running_seg"] == 3600
+
+
+def test_user_abort_rc130(data_root, tmp_path):
+    clk = FakeClock()
+    rc = cli.run(_live_args(tmp_path, data_root),
+                 _server_cls=lambda app, port: _Server(app, port, action="abort"),
+                 _sleep_fn=clk.sleep, _clock=clk.now)
+    assert rc == 130
+
+
+def test_incomplete_data_rc3(data_root, tmp_path, monkeypatch):
+    orig = io_bids.load_channels_uV
+    def truncated(subj, names, root=None):
+        return {c: a[:2000 * 50] for c, a in orig(subj, names, root).items()}
+    monkeypatch.setattr(cli.io_bids, "load_channels_uV", truncated)
+    clk = FakeClock()
+    rc = cli.run(_live_args(tmp_path, data_root),
+                 _server_cls=_Server, _sleep_fn=clk.sleep, _clock=clk.now)
+    assert rc == 3
+
+
+def test_engine_error_rc1(tmp_path):
+    # 不走数据：fault 注入替身 runner，start 即终态 engine_error
+    rc = cli.run(["--subj", "001", "--out-dir", str(tmp_path)],
+                 _server_cls=_Server, _fault="engine_error")
+    assert rc == 1
+
+
+def test_replay_rc0_and_writes_nothing(data_root, tmp_path):
+    # 先快放产出一次 run，再对它的 jsonl 起 replay 服务
+    clk = FakeClock()
+    out = eng.run_feedback(subj="001", root=data_root, out_root=tmp_path,
+                           run_id="rr", sleep_fn=clk.sleep, clock=clk.now)
+    jf = Path(out["run_dir"]) / "feedback.jsonl"
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    rc = cli.run(["--replay", str(jf), "--port", "8123"], _server_cls=_ReplayServer)
+    assert rc == 0
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    assert before == after  # replay 零写入
+
+
+def test_bad_replay_path_rc2(tmp_path):
+    rc = cli.run(["--replay", str(tmp_path / "nope.jsonl")], _server_cls=_ReplayServer)
+    assert rc == 2
