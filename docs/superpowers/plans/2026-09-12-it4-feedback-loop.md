@@ -3927,7 +3927,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - Modify: `evidence/README.md`（新增 IT4 节，沿 IT3 形态）
 - Evidence（人工）: `evidence/it4/` 下 PNG 截图
 
-- [ ] **Step 1: 全量回归 + 隔离守卫**
+- [x] **Step 1: 全量回归 + 隔离守卫**
 
 Run:
 ```bash
@@ -3938,7 +3938,7 @@ Expected: `156 passed`（无 ds007169 时数据用例 skip，数字相应下降�
 boundary 全绿（webapp/feedback_engine/theta_metric/feedback 均在 replay/，
 无 offline import、无 filtfilt）。
 
-- [ ] **Step 2: 自动验收数值落表（快放、可重复）**
+- [x] **Step 2: 自动验收数值落表（快放、可重复）**
 
 用注入时钟跑两次全量（不占 17 分钟真墙钟；真墙钟体验在 Step 4 人工走查）。新建
 `e:/tmp/it4_acceptance.py`（**不进仓库**，沿 IT2/IT3 probe 脚本习惯）：
@@ -3977,7 +3977,10 @@ print("valid:", [s["n_valid"] for s in sums])
 print("run.json:", open(runs[0][1], encoding="utf-8").read())
 ```
 
-Run: `uv run python e:/tmp/it4_acceptance.py`
+Run（cp936 控制台必须带 UTF-8：脚本直连引擎，引擎按既定决策保留 µ/中文打印，
+CLI 入口的 reconfigure 不覆盖诊断脚本；不带会在首个 [冻结] 行 UnicodeEncodeError
+并把会话置 aborted）：
+`PYTHONUTF8=1 PYTHONIOENCODING=utf-8 uv run python e:/tmp/it4_acceptance.py`
 Expected（把**实际输出**誊入 evidence README；下列为预估值，不预填）：
 - `sha256 equal: True`（A4）
 - b 约 0.248x / 0.378x；θ_thr 量级参照 ≈16.7 µV²（以实际为准）
@@ -3986,7 +3989,7 @@ Expected（把**实际输出**誊入 evidence README；下列为预估值，不�
 - run.json：status=ok、data_elapsed_s=840.0、wall_elapsed_s≈993.0（快放）、
   rate_ratio≈0.846、n_calib_seg=600、n_running_seg=3600
 
-- [ ] **Step 3: 字节级复核（独立命令）**
+- [x] **Step 3: 字节级复核（独立命令）**
 
 Run:
 ```bash
@@ -4051,4 +4054,31 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - [x] jsonl 可独立重算（T5 test_independent_recompute）并驱动网页回放（T6/T7）
 - [x] A4 字节一致（T5 + Step2/3）
 - [x] 不下疗效结论；S5/任务/六件套/ABABA 留 IT5–IT7
+
+> **执行记录（2026-09-17，Steps 1–3 自动化部分）**：
+>
+> - Step 1：`uv run pytest -q` → **156 passed / 0 skipped**（两次复跑 50.29s、47.78s）；boundary 3 passed。
+> - Step 2：e:/tmp/it4_acceptance.py 双跑（run_id=fixed，快放时钟），feedback.jsonl 各 **1,024,560 字节**，
+>   sha256=`10e6ac5df73a6bc921778019431a8773fde08fc29eb8be3a58aca3ff69b07bcb`，两跑相等。
+>   实测：b_FP1=0.24818283880484854、b_FP2=0.37812954137985105、θ_thr=16.77059514145452 µV²、
+>   n_thr_segs=496、calib_hit_rate=0.8004032258064516；
+>   rates=[0.752244, 0.872987, 0.799263, 0.831758, 0.809709, 0.882114]（命中 419/488/434/440/417/434）；
+>   invalid=[43,41,57,71,85,108]（锁死值一致），valid=[557,559,543,529,515,492]（和 3195，3195+405=3600，每块 600）；
+>   run.json：status=ok、wall_elapsed_s=993.0、data_elapsed_s=840.0、rate_ratio=0.8459、
+>   n_calib_seg=600、n_running_seg=3600。jsonl 行分布：meta 1 / phase 16 / calib_seg 600 / freeze 1 / seg 3600 / block_summary 6 / final 1。
+> - Step 3：cmp 两跑 jsonl → BYTE-IDENTICAL。
+> - 独立复核员（全新子代理，it4_v1/it4_v2 第三次/第四次跨进程重跑）：全部声称数字逐条 VERIFIED，
+>   jsonl 与其后两次重跑也字节一致；附加发现：seg 无效理由分布 401 L3 + 30 L1（405 段，部分双触发）；t1/k 单调。
+> - **两条 DISCREPANCY 经控制器裁定驳回**（均以 spec 原文为据）：
+>   ① 复核员称 run.json 的 wall_started_iso 跨跑不同违反 A4——**不成立**：spec §7.2 标题即「墙钟只在这里」，
+>   wall_started_iso 是 run.json 的设计字段；§7.3 A4 的字节一致范围明确仅 feedback.jsonl（「墙钟量一律不进 jsonl」），
+>   T9 Step 3 的 cmp 也只锁 jsonl。「快放下 run.json 也确定」是控制器派发词的过度概括，已在此更正。
+>   ② 复核员称 74 条 calib_seg invalid 无 reasons 违反 C5——**不成立**：§7.1 第 2 条冻结的 calib_seg schema
+>   就是 `{type,k,t1,theta_pow_uV2,valid,smoothed_uV2}` 六字段；C5（§109）的理由+暂停横幅是 S4 反馈环语义，
+>   reasons 只在 §7.1 第 4 条 seg 行上（实测 405 条全部带非空理由）。
+> - 环境注记：诊断脚本直连引擎、不经 CLI 的 stdout reconfigure，cp936 控制台须
+>   `PYTHONUTF8=1 PYTHONIOENCODING=utf-8` 运行，否则引擎 µ 打印 UnicodeEncodeError（Step 2 命令已更正）。
+>
+> Steps 4–6（人工 live/replay 走查、9 张截图、evidence README）由**用户本人**执行，完成后补记。
+
 <!-- APPEND-MARKER -->
