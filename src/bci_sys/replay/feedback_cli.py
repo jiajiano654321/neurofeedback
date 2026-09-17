@@ -105,7 +105,9 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
         registry["r"] = r
         def watch():
             r.join()
-            server.should_exit = True  # 引擎终态后关服务器（守护线程，不碰落盘）
+            # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
+            # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
+            server.should_exit = True
         threading.Thread(target=watch, daemon=True).start()
         return r
 

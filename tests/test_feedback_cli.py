@@ -1,5 +1,6 @@
 """IT4 CLI：argparse/help、rc 映射、preflight 先于服务器、快放全跑 rc=0、
 abort=130、截断=3、engine_error=1、replay 只读零写入。"""
+import json
 import subprocess
 import sys
 import threading
@@ -84,11 +85,13 @@ def test_live_full_run_rc0(data_root, tmp_path, capsys):
     assert "http://127.0.0.1:" in out  # spec §6：只绑本机且终端打印 URL
     runs = list((tmp_path / "feedback" / "sub-001").iterdir())
     rd = runs[0]
-    run = __import__("json").loads((rd / "run.json").read_text("utf-8"))
+    run = json.loads((rd / "run.json").read_text("utf-8"))
     assert run["status"] == "ok" and run["n_running_seg"] == 3600
 
 
 def test_user_abort_rc130(data_root, tmp_path):
+    # abort 在 POST 返回后的下一条语句立即置位：引擎线程刚启动尚在首段，
+    # 而 S3/S4 循环每段都检查 abort（快放全程需数秒 CPU，不可能在这一窗口内跑完）
     clk = FakeClock()
     rc = cli.run(_live_args(tmp_path, data_root),
                  _server_cls=lambda app, port: _Server(app, port, action="abort"),
@@ -99,12 +102,18 @@ def test_user_abort_rc130(data_root, tmp_path):
 def test_incomplete_data_rc3(data_root, tmp_path, monkeypatch):
     orig = io_bids.load_channels_uV
     def truncated(subj, names, root=None):
+        # 2000 段(400s 数据)：够校准 600 段 + 跑完第 1 个运行块 600 段，
+        # 之后才耗尽 → 终止原因必须是 S4 的 incomplete_data（rc=3），
+        # 而非校准期 freeze_failed 或全程正常 ok
         return {c: a[:2000 * 50] for c, a in orig(subj, names, root).items()}
     monkeypatch.setattr(cli.io_bids, "load_channels_uV", truncated)
     clk = FakeClock()
     rc = cli.run(_live_args(tmp_path, data_root),
                  _server_cls=_Server, _sleep_fn=clk.sleep, _clock=clk.now)
     assert rc == 3
+    rd = next((tmp_path / "feedback" / "sub-001").iterdir())
+    run = json.loads((rd / "run.json").read_text("utf-8"))
+    assert run["status"] == "aborted" and run["reason"] == "incomplete_data"
 
 
 def test_engine_error_rc1(tmp_path):
