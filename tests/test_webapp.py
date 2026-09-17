@@ -115,6 +115,7 @@ def test_abort_202_while_running_409_before_start_and_after_terminal(client):
     holder["r"].release()
     assert c.post("/api/abort").status_code == 202
     holder["r"].join(5)
+    assert not holder["r"].alive  # join 后脚本线程必须已收尾
     assert c.get("/api/run").json()["status"] == "aborted"
     assert c.post("/api/abort").status_code == 409  # 已终态
 
@@ -211,7 +212,7 @@ def test_replay_payload_matches_jsonl_and_offsets_monotonic(data_root, tmp_path)
             with c.websocket_connect("/ws") as ws:
                 ws.receive_json()
         assert ei.value.code == 1008
-        return pl
+        pass  # 全部断言已在函数体内完成
 
 
 def test_replay_reducer_finished_snapshot_and_seek(data_root, tmp_path):
@@ -231,3 +232,25 @@ def test_replay_reducer_finished_snapshot_and_seek(data_root, tmp_path):
     assert idx0 == -1
     snap0 = webapp.reduce_snapshot(pl["meta"], pl["frames"], idx0 + 1)
     assert snap0["phase"] == "calibration" and snap0["k"] is None
+
+
+def test_reducer_counts_only_valid_finite_segments_like_engine():
+    """reducer 中间态计数口径必须与 FeedbackSession.record_segment 一致：
+    valid 但功率非有限（jsonl 中 theta_pow_uV2=null）的段不进 n_valid/n_hit。"""
+    meta = {"params": eng.build_params()}
+
+    def seg(k, *, valid, powv, hit):
+        return {"type": "seg", "k": k, "t1": round(120.2 + 0.2 * k, 6),
+                "block_idx": 0, "seg_in_block": k, "theta_pow_uV2": powv,
+                "smoothed_uV2": None if powv is None else 2.0, "hit": hit,
+                "fz_clean_p2p_uv": 5.0, "eog_p2p_uv": 6.0,
+                "valid": valid, "reasons": [] if valid else ["L1"]}
+
+    frames = [
+        {"type": "phase", "phase": "block_start", "block_idx": 0, "t1": 123.0},
+        seg(0, valid=True, powv=1.0, hit=True),    # 计 n_valid+n_hit
+        seg(1, valid=True, powv=None, hit=None),   # 有效但非有限：两计数都不动
+        seg(2, valid=False, powv=None, hit=None),  # 无效段：两计数都不动
+    ]
+    snap = webapp.reduce_snapshot(meta, frames, len(frames))
+    assert snap["n_valid"] == 1 and snap["n_hit"] == 1

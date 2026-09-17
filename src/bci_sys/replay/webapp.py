@@ -12,13 +12,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import asyncio
+
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from .. import config, io_bids
 from . import feedback_engine as eng
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+_CARD_MS = int(config.FEEDBACK_FREEZE_CARD_SEC * 1000)
+_REST_MS = int(config.FEEDBACK_REST_SEC * 1000)
 
 
 # ---------------- replay：jsonl → 同协议帧 + 墙钟偏移（只算不落盘） ----------------
@@ -42,15 +48,15 @@ def load_replay(path: str | Path) -> dict:
         elif t == "freeze":
             wall = int(f["t_sec"] * 1000)
         elif t == "phase" and f["phase"] == "block_start":
-            wall = int(f["t1"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "seg":
-            wall = int(f["t1"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "block_summary":
-            wall = int(f["t1_end"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1_end"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "phase" and f["phase"] == "rest_start":
             wall = carry  # 紧贴上一块 summary 时刻
         elif t == "phase" and f["phase"] == "rest_end":
-            wall = carry + 30_000
+            wall = carry + _REST_MS
         else:  # final / aborted：停在上一帧时刻
             wall = carry
         offsets_ms.append(wall)
@@ -94,7 +100,8 @@ def reduce_snapshot(meta: dict, frames: list[dict], upto: int) -> dict:
                         last_verdict={"valid": f["valid"], "reasons": f["reasons"],
                                       "fz_clean_p2p_uv": f["fz_clean_p2p_uv"],
                                       "eog_p2p_uv": f["eog_p2p_uv"]})
-            if f["valid"]:
+            # 口径与 FeedbackSession.record_segment 一致：valid 且功率有限才进 n_valid
+            if f["valid"] and f["theta_pow_uV2"] is not None:
                 snap["n_valid"] += 1
                 if f["hit"]:
                     snap["n_hit"] += 1
@@ -221,9 +228,6 @@ def create_app(
 
         @app.websocket("/ws")
         async def ws_bridge(ws: WebSocket):
-            import asyncio
-            from starlette.concurrency import run_in_threadpool
-
             # 单连接：第二连接 accept 后立刻以 429 关闭（跨 Starlette 版本可移植）
             if getattr(app.state, "ws_taken", False):
                 await ws.accept()
@@ -259,10 +263,8 @@ def create_app(
             if target != replay_resolved:
                 # 白名单 = 启动参数解析出的单一文件；越界/穿越/换名全部 400
                 raise HTTPException(400, "file 不在 replay 白名单内")
-            try:
-                return load_replay(target)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                raise HTTPException(400, f"replay 文件不可读：{exc}")
+            # 构造时已读一次，端点直接复用内存快照（不复读、不解析）
+            return replay_payload
 
         @app.post("/api/start")
         async def replay_start():
