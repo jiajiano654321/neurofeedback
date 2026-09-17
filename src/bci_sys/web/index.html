@@ -1,1 +1,178 @@
-<!doctype html><html><head><meta charset="utf-8"></head><body>IT4</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IT4 feedback-loop</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --mut:#8b98a5;
+    --green:#2ea043; --green2:#4ec94e; --red:#d62728; --red2:#ff7676;
+    --yellow:#e5c07b; --blue:#58a6ff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family:"Segoe UI","Microsoft YaHei",sans-serif; }
+  #topbar { display:flex; align-items:center; gap:14px; padding:10px 18px;
+            border-bottom:1px solid var(--line); font-size:13px; }
+  #title { font-weight:700; }
+  #badge-mode { padding:2px 10px; border-radius:20px; background:#3d3412;
+                color:var(--yellow); font-size:12px; font-weight:600;
+                display:none; }
+  body.replay #badge-mode { display:inline-block; }
+  .dot { margin-left:auto; width:9px; height:9px; border-radius:50%;
+         background:#6e7681; }
+  .dot.live { background:var(--green2); } .dot.off { background:var(--red2); }
+  main { max-width:860px; margin:0 auto; padding:22px 18px 60px; }
+  .screen.hidden, #replay-bar.hidden { display:none; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:20px 24px; }
+  h2 { font-size:17px; margin:0 0 14px; }
+  .kv { font-size:13.5px; line-height:2.0; color:#c9d1d9; } .kv b { color:var(--fg); }
+  .note { font-size:12px; color:var(--mut); margin:10px 0 0; }
+  button { cursor:pointer; border-radius:8px; font-weight:700; }
+  .bigbtn { background:var(--green); color:#fff; border:0; padding:12px 30px;
+            font-size:15px; margin-top:16px; }
+  .bigbtn:disabled { background:#30363d; color:#6e7681; cursor:default; }
+  .abortbtn { background:#21262d; color:var(--red2); border:1px solid #7a4040;
+              padding:8px 16px; font-size:12px; }
+  .count { font-size:42px; font-weight:700; text-align:center; margin:8px 0;
+           font-variant-numeric:tabular-nums; }
+  .sub { font-size:12px; color:var(--mut); text-align:center; }
+  .cal-dots { display:flex; gap:3px; flex-wrap:wrap; margin:16px 0; }
+  .cal-dots i { width:9px; height:9px; border-radius:2px; background:#30363d;
+                font-style:normal; }
+  .cal-dots i.on { background:#8b98a5; }
+  .top { display:flex; justify-content:space-between; align-items:center;
+         font-size:13px; color:#9aa7b4; margin-bottom:12px; }
+  .dots6 { font-size:17px; letter-spacing:3px; color:#303942; }
+  .dots6 b { color:var(--green2); font-weight:700; }
+  .chip { padding:2px 11px; border-radius:20px; font-size:12px; font-weight:600; }
+  .chip.ok { background:#123d1f; color:var(--green2); }
+  .chip.bad { background:#4a1d1d; color:var(--red2); }
+  .bar-wrap { background:#21262d; border-radius:8px; height:32px; position:relative;
+              margin:14px 0 6px; }
+  .bar-fill { height:100%; border-radius:8px; width:0%;
+              background:linear-gradient(90deg,var(--green),var(--green2)); }
+  .bar-wrap.paused .bar-fill {
+    background:repeating-linear-gradient(45deg,#5a3a3a,#5a3a3a 8px,#3a2424 8px,#3a2424 16px); }
+  .bar-label { font-size:11.5px; color:var(--mut); text-align:right; }
+  .tick { position:absolute; top:0; bottom:0; width:2px; background:#e6edf3;
+          opacity:.85; }
+  .gauge-track { background:#21262d; height:14px; border-radius:7px;
+                 position:relative; margin:16px 0 4px; }
+  .gauge-fill { position:absolute; inset:0 auto 0 0; width:0%; border-radius:7px;
+                background:var(--blue); }
+  .gauge-thr { position:absolute; top:-5px; bottom:-5px; width:2px;
+               background:var(--yellow); }
+  .gauge-label { font-size:11.5px; color:var(--mut); }
+  .banner { margin-top:14px; border-radius:8px; padding:9px 12px; font-size:13.5px;
+            text-align:center; background:#3a2424; border:1px solid #7a4040;
+            color:#ffb3b3; display:none; }
+  body.invalid .banner { display:block; }
+  body.invalid .bar-wrap { border:1px solid #7a4040; }
+  .rest-title { color:var(--yellow); font-size:20px; font-weight:700;
+                text-align:center; }
+  table.rates { width:100%; border-collapse:collapse; font-size:13.5px; margin-top:12px; }
+  .rates td,.rates th { padding:6px; border-bottom:1px solid #21262d; text-align:center; }
+  .rates th { color:var(--mut); font-weight:600; }
+  .warn { color:var(--red2); font-size:20px; font-weight:700; }
+  .disclaimer { font-size:12px; color:var(--mut); margin-top:14px; }
+  #replay-bar { display:flex; align-items:center; gap:12px; margin-bottom:14px;
+                background:var(--panel); border:1px solid var(--line);
+                border-radius:10px; padding:10px 16px; font-size:13px; }
+  #replay-seek { flex:1; }
+  .ghostbtn { background:#21262d; color:#c9d1d9; border:1px solid var(--line);
+              border-radius:8px; padding:8px 18px; font-size:13px; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <span id="title">IT4 反馈训练 · feedback-loop</span>
+  <span id="badge-mode">回放模式（只读，不落盘）</span>
+  <span id="ws-dot" class="dot"></span>
+</div>
+<main>
+  <div id="replay-bar">
+    <button id="btn-replay-play" class="ghostbtn">▶ 播放</button>
+    <input id="replay-seek" type="range" min="0" max="0" value="0" step="1">
+    <span id="replay-time" class="sub" style="min-width:120px">00:00 / 00:00</span>
+  </div>
+
+  <section id="screen-confirm" class="screen panel">
+    <h2>启动前参数确认</h2>
+    <div class="kv" id="confirm-kv">正在读取冻结参数…</div>
+    <p class="note">参数确认后冻结，运行期无任何修改入口；要改只能中止重来。</p>
+    <button id="btn-start" class="bigbtn">确认参数并开始 S3 校准</button>
+  </section>
+
+  <section id="screen-calibration" class="screen panel hidden">
+    <h2>S3 校准中 · 阈值将在 02:00 冻结，冻结后不可更改</h2>
+    <div class="count"><span id="cal-time">00:00</span>
+      <span style="font-size:18px;color:#8b98a5"> / 02:00</span></div>
+    <div id="cal-dots" class="cal-dots" aria-hidden="true"></div>
+    <div style="text-align:right"><button id="btn-abort-cal" class="abortbtn">中止会话</button></div>
+  </section>
+
+  <section id="screen-freeze" class="screen panel hidden">
+    <h2 style="text-align:center">参数已冻结（frozen）</h2>
+    <div class="kv" style="text-align:center;font-size:15px;line-height:2.2"
+         id="freeze-kv"></div>
+    <div class="sub">即将进入 block 1…</div>
+    <div style="text-align:right;margin-top:10px">
+      <button id="btn-abort-freeze" class="abortbtn">中止会话</button></div>
+  </section>
+
+  <section id="screen-block" class="screen panel hidden">
+    <div class="top">
+      <span><span id="block-dots" class="dots6"></span>
+            <b id="block-label" style="margin-left:10px"></b></span>
+      <span id="block-timeleft"></span>
+      <span id="qc-chip" class="chip ok"></span>
+    </div>
+    <div id="hit-bar" class="bar-wrap">
+      <div id="hit-fill" class="bar-fill"></div>
+      <div id="hit-tick" class="tick" style="left:80%"></div>
+    </div>
+    <div class="bar-label" id="hit-label"></div>
+    <div id="theta-gauge" class="gauge-track">
+      <div id="theta-fill" class="gauge-fill"></div>
+      <div id="theta-thr" class="gauge-thr" style="left:50%"></div>
+    </div>
+    <div class="gauge-label" id="theta-label">θ 平滑功率 —（黄线＝S3 冻结阈值）</div>
+    <div id="invalid-banner" class="banner"></div>
+    <div style="text-align:right;margin-top:12px">
+      <button id="btn-abort-block" class="abortbtn">中止会话</button></div>
+  </section>
+
+  <section id="screen-rest" class="screen panel hidden">
+    <div class="rest-title">休息中 · 数据钟暂停</div>
+    <div class="count" id="rest-countdown">00:30</div>
+    <div class="sub" id="rest-prev"></div>
+    <div style="text-align:right;margin-top:14px">
+      <button id="btn-abort-rest" class="abortbtn">中止会话</button></div>
+  </section>
+
+  <section id="screen-finished" class="screen panel hidden">
+    <h2>会话完成</h2>
+    <div class="kv" id="finished-kv"></div>
+    <table class="rates">
+      <tbody id="rates-body">
+      <tr id="rates-head"><th>block</th></tr>
+      <tr id="rates-rate"><th>达标率</th></tr>
+      <tr id="rates-invalid"><th>无效段</th></tr>
+      </tbody>
+    </table>
+    <div class="disclaimer">描述性结果，不是疗效结论。产物：feedback.jsonl / run.json
+      （命令行打印的目录路径）。</div>
+  </section>
+
+  <section id="screen-aborted" class="screen panel hidden">
+    <div class="warn">会话已中止</div>
+    <div class="kv" id="aborted-kv" style="margin-top:10px"></div>
+    <div class="disclaimer">本次数据标记为中止（aborted），不删除（D3）。</div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
