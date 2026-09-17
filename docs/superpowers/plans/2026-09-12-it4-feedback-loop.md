@@ -22,7 +22,7 @@
 - **C7**：错误硬拦，不提供「继续/忽略/跳过」入口。
 - **A4**：feedback.jsonl 两次运行字节一致；墙钟、线程、队列、seq、dropped、ISO 时间戳一律不进 jsonl（只进 run.json）。
 - **单位**：mne 输出已是 µV，**严禁 ×1e6**；θ 功率单位 µV²。
-- 每个任务结束：`uv run pytest -q` 全绿才 commit；commit message 用 `type(scope): 中文描述`，trailer 固定 `Co-Authored-By: Claude <noreply@anthropic.com>`。
+- 每个任务结束：`uv run pytest -q` 全绿才 commit；commit message 用 `type(scope): 中文描述`，trailer 固定 `Co-Authored-By: Claude Code <noreply@anthropic.com>`（2026-09-17 起规则；早期任务实际提交历史中为 Claude / Claude Sonnet 5，属历史原貌，不改写）。
 - **不要 add/commit** [src/bci_sys/offline/probe.py](src/bci_sys/offline/probe.py) 和 [src/bci_sys/offline/theta.py](src/bci_sys/offline/theta.py)（外部未提交改动）；每个任务只 stage 本任务文件。
 - Windows 控制台：CLI 入口开头 UTF-8 reconfigure（沿 IT3）；jsonl `newline="\n"`、`encoding="utf-8"`、逐行 flush。
 - 本计划 9 个实现任务 + 1 个验收任务；命名/签名在任务间严格一致（见各任务代码）。
@@ -3567,6 +3567,7 @@ spec §5.2、§6、§8。顺序铁律：**preflight + 读盘在 uvicorn 启动�
 ```python
 """IT4 CLI：argparse/help、rc 映射、preflight 先于服务器、快放全跑 rc=0、
 abort=130、截断=3、engine_error=1、replay 只读零写入。"""
+import json
 import subprocess
 import sys
 import threading
@@ -3651,11 +3652,13 @@ def test_live_full_run_rc0(data_root, tmp_path, capsys):
     assert "http://127.0.0.1:" in out  # spec §6：只绑本机且终端打印 URL
     runs = list((tmp_path / "feedback" / "sub-001").iterdir())
     rd = runs[0]
-    run = __import__("json").loads((rd / "run.json").read_text("utf-8"))
+    run = json.loads((rd / "run.json").read_text("utf-8"))
     assert run["status"] == "ok" and run["n_running_seg"] == 3600
 
 
 def test_user_abort_rc130(data_root, tmp_path):
+    # abort 在 POST 返回后的下一条语句立即置位：引擎线程刚启动尚在首段，
+    # 而 S3/S4 循环每段都检查 abort（快放全程需数秒 CPU，不可能在这一窗口内跑完）
     clk = FakeClock()
     rc = cli.run(_live_args(tmp_path, data_root),
                  _server_cls=lambda app, port: _Server(app, port, action="abort"),
@@ -3666,12 +3669,18 @@ def test_user_abort_rc130(data_root, tmp_path):
 def test_incomplete_data_rc3(data_root, tmp_path, monkeypatch):
     orig = io_bids.load_channels_uV
     def truncated(subj, names, root=None):
+        # 2000 段(400s 数据)：够校准 600 段 + 跑完第 1 个运行块 600 段，
+        # 之后才耗尽 → 终止原因必须是 S4 的 incomplete_data（rc=3），
+        # 而非校准期 freeze_failed 或全程正常 ok
         return {c: a[:2000 * 50] for c, a in orig(subj, names, root).items()}
     monkeypatch.setattr(cli.io_bids, "load_channels_uV", truncated)
     clk = FakeClock()
     rc = cli.run(_live_args(tmp_path, data_root),
                  _server_cls=_Server, _sleep_fn=clk.sleep, _clock=clk.now)
     assert rc == 3
+    rd = next((tmp_path / "feedback" / "sub-001").iterdir())
+    run = json.loads((rd / "run.json").read_text("utf-8"))
+    assert run["status"] == "aborted" and run["reason"] == "incomplete_data"
 
 
 def test_engine_error_rc1(tmp_path):
@@ -3816,7 +3825,9 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
         registry["r"] = r
         def watch():
             r.join()
-            server.should_exit = True  # 引擎终态后关服务器（守护线程，不碰落盘）
+            # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
+            # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
+            server.should_exit = True
         threading.Thread(target=watch, daemon=True).start()
         return r
 
@@ -3885,7 +3896,7 @@ Expected: 9 passed（数据用例无 ds007169 时 skip）。
 - [ ] **Step 6: 全量回归**
 
 Run: `uv run pytest -q`
-Expected: `156 passed`（147+9；skip 取决于数据）。
+Expected: `156 passed`（147+9；数据集已装 → 0 skipped，实测 48.85s）。
 
 - [ ] **Step 7: Commit**
 
@@ -3893,8 +3904,18 @@ Expected: `156 passed`（147+9；skip 取决于数据）。
 git add src/bci_sys/replay/feedback_cli.py tests/test_feedback_cli.py pyproject.toml
 git commit -m "feat(it4): feedback-loop CLI——preflight 先于服务器/rc 0,2,130,3,1/replay 只读
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
+
+> **执行记录（2026-09-17）**：首提交 f1d1cd5（3 文件 +289：9 测试 → 156 passed/0 skipped）。
+> 规格门 ✅（0/0/0；讨论点：服务器启动前 Ctrl-C 无会话可落 aborted 行，归兜底 rc=1 而非 130，裁定可接受）。
+> 质量门 ✅ APPROVED（0 Critical/0 Important/3 Minor），润色提交 c01baf7：
+> ① watch() 的 `server.should_exit` 补契约注释（uvicorn 公开退出信号，watch 线程只发信号不碰落盘）；
+> ② abort 测试补时序说明（POST 返回后立即置位，S3/S4 每段检查 abort，快放全程数秒 CPU 不可能跑完该窗口），不引入额外测试缝（YAGNI）；
+> ③ 截断魔数 2000×50 补注释（600 校准+600 一块后耗尽 → incomplete_data 而非 freeze_failed），
+> 并加强断言 run.json `status=="aborted" and reason=="incomplete_data"`；测试顶层改 `import json` 替换内联 `__import__`。
+> 润色后复跑 CLI 9/9（9.13s）、全量 156/0（48.85s）、boundary 3。
+
 ---
 
 ### Task 9: 全量验收与留证（spec §10）
@@ -4021,7 +4042,7 @@ A4 sha256 与 cmp 结果、run.json 关键字段、9 张截图引用、replay �
 git add evidence/README.md evidence/it4/   # 按 IT3 先例调整截图是否 add
 git commit -m "evidence(it4): 全量留证——八相位截图/实测数值表/A4 sha256/replay 说明
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
 - [ ] **Step 7: 完成判据对照（spec §10）**
