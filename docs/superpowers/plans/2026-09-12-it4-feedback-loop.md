@@ -2346,6 +2346,7 @@ def test_abort_202_while_running_409_before_start_and_after_terminal(client):
     holder["r"].release()
     assert c.post("/api/abort").status_code == 202
     holder["r"].join(5)
+    assert not holder["r"].alive  # join 后脚本线程必须已收尾
     assert c.get("/api/run").json()["status"] == "aborted"
     assert c.post("/api/abort").status_code == 409  # 已终态
 
@@ -2442,7 +2443,28 @@ def test_replay_payload_matches_jsonl_and_offsets_monotonic(data_root, tmp_path)
             with c.websocket_connect("/ws") as ws:
                 ws.receive_json()
         assert ei.value.code == 1008
-        return pl
+
+
+def test_reducer_counts_only_valid_finite_segments_like_engine():
+    """reducer 中间态计数口径必须与 FeedbackSession.record_segment 一致：
+    valid 但功率非有限（jsonl 中 theta_pow_uV2=null）的段不进 n_valid/n_hit。"""
+    meta = {"params": eng.build_params()}
+
+    def seg(k, *, valid, powv, hit):
+        return {"type": "seg", "k": k, "t1": round(120.2 + 0.2 * k, 6),
+                "block_idx": 0, "seg_in_block": k, "theta_pow_uV2": powv,
+                "smoothed_uV2": None if powv is None else 2.0, "hit": hit,
+                "fz_clean_p2p_uv": 5.0, "eog_p2p_uv": 6.0,
+                "valid": valid, "reasons": [] if valid else ["L1"]}
+
+    frames = [
+        {"type": "phase", "phase": "block_start", "block_idx": 0, "t1": 123.0},
+        seg(0, valid=True, powv=1.0, hit=True),    # 计 n_valid+n_hit
+        seg(1, valid=True, powv=None, hit=None),   # 有效但非有限：两计数都不动
+        seg(2, valid=False, powv=None, hit=None),  # 无效段：两计数都不动
+    ]
+    snap = webapp.reduce_snapshot(meta, frames, len(frames))
+    assert snap["n_valid"] == 1 and snap["n_hit"] == 1
 
 
 def test_replay_reducer_finished_snapshot_and_seek(data_root, tmp_path):
@@ -2485,16 +2507,22 @@ Expected: FAIL（`ModuleNotFoundError: webapp`；静态文件 404）
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from .. import config, io_bids
 from . import feedback_engine as eng
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+# 纯墙钟时长（数据钟暂停段），ms 形式供 offsets 计算；单一来源 config，禁止再硬编码
+_CARD_MS = int(config.FEEDBACK_FREEZE_CARD_SEC * 1000)
+_REST_MS = int(config.FEEDBACK_REST_SEC * 1000)
 
 
 # ---------------- replay：jsonl → 同协议帧 + 墙钟偏移（只算不落盘） ----------------
@@ -2518,15 +2546,15 @@ def load_replay(path: str | Path) -> dict:
         elif t == "freeze":
             wall = int(f["t_sec"] * 1000)
         elif t == "phase" and f["phase"] == "block_start":
-            wall = int(f["t1"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "seg":
-            wall = int(f["t1"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "block_summary":
-            wall = int(f["t1_end"] * 1000) + 3000 + f["block_idx"] * 30_000
+            wall = int(f["t1_end"] * 1000) + _CARD_MS + f["block_idx"] * _REST_MS
         elif t == "phase" and f["phase"] == "rest_start":
             wall = carry  # 紧贴上一块 summary 时刻
         elif t == "phase" and f["phase"] == "rest_end":
-            wall = carry + 30_000
+            wall = carry + _REST_MS
         else:  # final / aborted：停在上一帧时刻
             wall = carry
         offsets_ms.append(wall)
@@ -2570,7 +2598,9 @@ def reduce_snapshot(meta: dict, frames: list[dict], upto: int) -> dict:
                         last_verdict={"valid": f["valid"], "reasons": f["reasons"],
                                       "fz_clean_p2p_uv": f["fz_clean_p2p_uv"],
                                       "eog_p2p_uv": f["eog_p2p_uv"]})
-            if f["valid"]:
+            # 口径与 FeedbackSession.record_segment 一致：valid 且功率有限才进 n_valid
+            # （seg 行 theta_pow_uV2 非有限时落盘 null，既不进分母也不进分子）
+            if f["valid"] and f["theta_pow_uV2"] is not None:
                 snap["n_valid"] += 1
                 if f["hit"]:
                     snap["n_hit"] += 1
@@ -2661,7 +2691,10 @@ def create_app(
             return {**info, "status": None, "reason": None, "run_dir": None}
         outcome = getattr(r, "outcome", None)
         if outcome is None:
-            return {**info, "status": None, "reason": None, "run_dir": r.run_dir}
+            # JSON 出口统一正斜杠，保证 Windows 下 endswith("sub-001/fake") 类断言可移植；
+            # 磁盘回读仍用原始 r.run_dir（下面 Path 拼接），归一化只作用于响应字符串
+            return {**info, "status": None, "reason": None,
+                    "run_dir": r.run_dir.replace("\\", "/")}
         # 终态后回读 run.json：数据/墙钟时长只从这里进浏览器（不进 WS、不进 jsonl）
         run_json_path = Path(r.run_dir) / "run.json"
         extra = {}
@@ -2670,7 +2703,8 @@ def create_app(
         except OSError:
             pass
         return {**info, "status": outcome["status"],
-                "reason": outcome.get("reason"), "run_dir": r.run_dir, **extra}
+                "reason": outcome.get("reason"),
+                "run_dir": r.run_dir.replace("\\", "/"), **extra}
 
     if mode == "live":
         @app.post("/api/start")
@@ -2680,23 +2714,21 @@ def create_app(
             runner = runner_factory(subj=subj, root=data_root, out_root=out_root)
             app.state.runner = runner
             runner.start()
-            return {"run_dir": runner.run_dir}
+            return {"run_dir": runner.run_dir.replace("\\", "/")}
 
         @app.post("/api/abort")
-        def api_abort():
+        def api_abort(response: Response):
             runner = app.state.runner
             if runner is None:
                 raise HTTPException(409, "尚无运行中的会话")
             if getattr(runner, "outcome", None) is not None:
                 raise HTTPException(409, "会话已终态")
             runner.abort.set()
+            response.status_code = 202  # Accepted：已受理，终态由引擎线程异步落定
             return {"accepted": True}
 
         @app.websocket("/ws")
         async def ws_bridge(ws: WebSocket):
-            import asyncio
-            from starlette.concurrency import run_in_threadpool
-
             # 单连接：第二连接 accept 后立刻以 429 关闭（跨 Starlette 版本可移植）
             if getattr(app.state, "ws_taken", False):
                 await ws.accept()
@@ -2730,12 +2762,12 @@ def create_app(
         def api_replay(file: str = Query(..., min_length=1)):
             target = (replay_resolved.parent / file).resolve()
             if target != replay_resolved:
-                # 白名单 = 启动参数解析出的单一文件；越界/穿越/换名全部 400
+                # 白名单 = 启动参数解析出的单一文件；越界/穿越/换名全部 400。
+                # 比较在一切读盘之前：不存在/无权限的文件名同样只得到 400，无差异侧信道
                 raise HTTPException(400, "file 不在 replay 白名单内")
-            try:
-                return load_replay(target)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                raise HTTPException(400, f"replay 文件不可读：{exc}")
+            # 构造时已读一次，端点直接复用内存快照（不复读、不解析；坏文件在构造期
+            # /T8 CLI 预检就失败，端点层不存在 KeyError→500 路径）
+            return replay_payload
 
         @app.post("/api/start")
         async def replay_start():
@@ -2756,27 +2788,32 @@ def create_app(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `uv run pytest tests/test_webapp.py -q`
-Expected: 8 passed（replay 两个用例需 ds007169，无数据 skip）。`test_static_*` 在 T7 创建文件前会 404——本任务先建最小静态占位：`src/bci_sys/web/index.html`（内容 `<!doctype html><html><head><meta charset="utf-8"></head><body>IT4</body></html>`）与 `src/bci_sys/web/app.js`（内容 `// IT4 placeholder`），T7 整体替换。
+Expected: 9 passed（replay 两个用例需 ds007169，无数据 skip；第 9 个 `test_reducer_counts_only_valid_finite_segments_like_engine` 为质量门新增的口径守卫）。`test_static_*` 在 T7 创建文件前会 404——本任务先建最小静态占位：`src/bci_sys/web/index.html`（内容 `<!doctype html><html><head><meta charset="utf-8"></head><body>IT4</body></html>`）与 `src/bci_sys/web/app.js`（内容 `// IT4 placeholder`），T7 整体替换。
 
 - [ ] **Step 5: 全量回归 + AST 守卫**
 
 Run: `uv run pytest -q`
-Expected: `143 passed`（135+8，含本任务新用例与 T7 占位文件；replay 2 用例无数据 skip）。
+Expected: `144 passed`（135+9，含本任务新用例与 T7 占位文件；replay 2 用例无数据 skip）。
 另跑：`uv run pytest tests/test_boundary.py -q`——webapp.py 位于 replay/，自动守卫（无 offline import、无 filtfilt）。
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/bci_sys/replay/webapp.py src/bci_sys/web/ tests/test_webapp.py pyproject.toml
+git add src/bci_sys/replay/webapp.py src/bci_sys/web/ tests/test_webapp.py   # pyproject.toml 仅在缺包时
 git commit -m "feat(it4): webapp——单连接 WS 桥接/start-abort/replay 白名单与 reducer
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
 
 （pyproject.toml 仅当 hatchling 需要显式声明 web/ 包内资源时才改：先构建检查
-`uv build` 产物 wheel 里是否含 bci_sys/web/index.html；hatchling 默认打进包目录下
-全部文件，通常无需改动——若产物缺文件，再加
+`uv build` 产物 wheel 里是否含 bci_sys/web/index.html；**实测 hatchling 默认已打入，
+pyproject 未改，dist/ 检查后删除**——若产物缺文件，再加
 `[tool.hatch.build.targets.wheel] packages = [\"src/bci_sys\"]` 与 include 配置。）
+
+> **执行记录（2026-09-17）**：首提交 1f887b8（4 文件 +515：8 测试 → 143 passed）；
+> 质量门裁定后修复提交 99a475d（reducer finite 口径 + 新测试 8→9、/api/replay 复用
+> 构造期 replay_payload、_CARD_MS/_REST_MS 常量化、import 移顶、abort 加 alive 断言、
+> 删 return pl）→ **144 passed / 0 skipped / boundary 3**。计划嵌入代码已同步为最终形态。
 ---
 
 ### Task 7: 前端（八相位单页 + WS 重连 + replay 播放器）
@@ -3472,7 +3509,7 @@ Expected: 3 passed。
 - [ ] **Step 6: 全量回归**
 
 Run: `uv run pytest -q`
-Expected: `146 passed`（143+3；数据用例无 ds007169 时 skip）。
+Expected: `147 passed`（144+3；数据用例无 ds007169 时 skip）。
 手动冒烟（不阻塞提交，T9 系统验收）：`uv run uvicorn bci_sys.replay.webapp:create_app --factory --port 8000` 仅验证工厂可导入；真实 live/replay 走 T8 CLI。
 
 - [ ] **Step 7: Commit**
@@ -3822,7 +3859,7 @@ Expected: 9 passed（数据用例无 ds007169 时 skip）。
 - [ ] **Step 6: 全量回归**
 
 Run: `uv run pytest -q`
-Expected: `155 passed`（146+9；skip 取决于数据）。
+Expected: `156 passed`（147+9；skip 取决于数据）。
 
 - [ ] **Step 7: Commit**
 
@@ -3850,7 +3887,7 @@ Run:
 uv run pytest -q
 uv run pytest tests/test_boundary.py -q
 ```
-Expected: `155 passed`（无 ds007169 时数据用例 skip，数字相应下降且无 failure）；
+Expected: `156 passed`（无 ds007169 时数据用例 skip，数字相应下降且无 failure）；
 boundary 全绿（webapp/feedback_engine/theta_metric/feedback 均在 replay/，
 无 offline import、无 filtfilt）。
 
