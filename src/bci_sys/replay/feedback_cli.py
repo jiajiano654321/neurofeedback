@@ -38,7 +38,7 @@ def _watch_runner_then_stop_server(server, runner) -> None:
     if not started:
         print("[watcher] runner 在 30s 内未 start，按未启动关停服务器",
               file=sys.stderr)
-    runner.join()
+    runner.join()  # 超时未 start 时 join 必立即返回，保留统一出口
     # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
     # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
     server.should_exit = True
@@ -86,7 +86,10 @@ class _FaultRunner:
                         "run_dir": self.run_dir}
 
     def join(self, timeout=None):
-        pass
+        # 与 FeedbackRunner.join 同构：start() 前 _t is None 直接返回；
+        # start() 同步置终态，故 start 后 join 也立即返回
+        if self._t is None:
+            return
 
 
 def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
