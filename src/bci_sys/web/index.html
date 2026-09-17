@@ -93,7 +93,7 @@
   <span id="ws-dot" class="dot"></span>
 </div>
 <main>
-  <div id="replay-bar">
+  <div id="replay-bar" class="hidden">
     <button id="btn-replay-play" class="ghostbtn">▶ 播放</button>
     <input id="replay-seek" type="range" min="0" max="0" value="0" step="1">
     <span id="replay-time" class="sub" style="min-width:120px">00:00 / 00:00</span>
@@ -156,6 +156,7 @@
   <section id="screen-finished" class="screen panel hidden">
     <h2>会话完成</h2>
     <div class="kv" id="finished-kv"></div>
+    <div class="kv" id="finished-rundir" style="display:none"></div>
     <table class="rates">
       <tbody id="rates-body">
       <tr id="rates-head"><th>block</th></tr>

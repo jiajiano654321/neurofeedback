@@ -31,7 +31,7 @@ let S = freshState();
 let restEndsAt = 0, restTimer = null;
 
 // ---------- WS（live） ----------
-let ws = null, lastSeq = 0, wsShouldRun = true, reconnectMs = 300;
+let ws = null, lastSeq = 0, wsShouldRun = true, reconnectMs = 300, reconnectTimer = null;
 
 function connectWs() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -57,18 +57,26 @@ function connectWs() {
   };
   ws.onclose = () => {
     $("ws-dot").className = "off dot";
-    if (wsShouldRun) setTimeout(connectWs, reconnectMs);
+    scheduleReconnect();  // 重连唯一入口；终态后 wsShouldRun=false 自动不排
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 function scheduleReconnect() {
   if (!wsShouldRun) return;
-  try { ws.close(); } catch (e) {}
-  setTimeout(connectWs, reconnectMs);
+  try { ws.close(); } catch (e) {}  // 已 CLOSED 时 close() 是空操作，不会重复触发
+  // 去重：消息路径关流与随之而来的 onclose 都会进本函数，只保留一个挂起重连
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectWs, reconnectMs);
 }
 
 // ---------- 状态应用（live 帧与 replay 帧共用） ----------
 function applySnapshot(m) {
+  if (m.block_idx != null && m.block_idx !== S.blockIdx) {
+    // 重连追平时已跨块：本块计数从 0 重新累计（snapshot 不携带本块分母，
+    // 历史分母不可重建；同块内重连则保留断线前计数，gap 期间帧不可追回）
+    S.blockValid = 0; S.blockHit = 0; S.verdict = null;
+    document.body.classList.remove("invalid");
+  }
   S.phase = m.phase;
   S.blockIdx = m.block_idx;
   S.segInBlock = m.seg_in_phase || 0;
@@ -301,8 +309,10 @@ function renderFinished() {
   } else { wall = "—"; data = S.t1 ?? "—"; }
   $("finished-kv").innerHTML =
     `会话完成 · sub-${S.subj ?? "001"} · 数据 <b>${data}s</b>` +
-    ` / 墙钟 <b>${typeof wall === "number" ? wall.toFixed(1) : wall}s</b><br>` +
-    (S.runDir ? `产物目录：<b>${S.runDir}</b>` : "");
+    ` / 墙钟 <b>${typeof wall === "number" ? wall.toFixed(1) : wall}s</b>`;
+  const rd = $("finished-rundir");
+  if (S.runDir) { rd.style.display = ""; rd.textContent = `产物目录：${S.runDir}`; }
+  else { rd.style.display = "none"; }
 }
 
 function renderAborted() {
@@ -321,6 +331,7 @@ const RP = { meta: null, frames: [], offs: [], boundaries: [],
 
 async function bootReplay(file) {
   document.body.classList.add("replay");
+  document.querySelectorAll(".abortbtn").forEach((b) => { b.style.display = "none"; });
   $("replay-bar").classList.remove("hidden");
   wsShouldRun = false;
   $("ws-dot").className = "dot";
@@ -372,6 +383,7 @@ function resetReplayState() {
   const subj = S.subj, vhdr = S.dataVhdr, mode = S.mode;
   S = freshState();
   S.mode = mode; S.subj = subj; S.dataVhdr = vhdr; S.params = RP.meta.params;
+  document.body.classList.remove("invalid");
 }
 function replaySeekTo(wallMs) {
   // 吸附到该时刻或之前最近相位边界，从头 reduce 重建 snapshot（与后端口径一致）
@@ -424,7 +436,7 @@ function onStart() {
 }
 async function doAbort() {
   const r = await fetch("/api/abort", { method: "POST" });
-  if (!r.ok && r.status !== 202) alert("中止请求失败：" + r.status);
+  if (!r.ok) alert("中止请求失败：" + r.status);  // 202 Accepted 属成功，不报警
 }
 
 boot();
