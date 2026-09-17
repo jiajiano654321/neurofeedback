@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -173,7 +174,6 @@ def test_watch_runner_waits_for_start_before_joining():
 
     # start() 之前：watcher 必须卡在轮询，绝不置 should_exit
     # 旧实现（watch 直接 join）会在这里立即置 True → 红相
-    import time
     time.sleep(0.05)
     assert server.should_exit is False, (
         "watcher 在 runner.start() 前就置了 should_exit —— 启动竞态未修复")

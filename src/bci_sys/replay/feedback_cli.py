@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .. import config, io_bids
@@ -28,11 +29,15 @@ def _watch_runner_then_stop_server(server, runner) -> None:
     引擎刚启动在 k=0 就落 user_abort（启动竞态，uvicorn 真实路径每次必现）。
     """
     # 轮询等 _t 被赋值（start() 才会做）；间隔 10ms，最多等 30s（极端慢启动兜底）
-    import time
+    started = False
     for _ in range(3000):
         if runner._t is not None:
+            started = True
             break
         time.sleep(0.01)
+    if not started:
+        print("[watcher] runner 在 30s 内未 start，按未启动关停服务器",
+              file=sys.stderr)
     runner.join()
     # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
     # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
