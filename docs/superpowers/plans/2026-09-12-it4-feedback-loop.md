@@ -2839,7 +2839,7 @@ from fastapi.testclient import TestClient
 
 from bci_sys.replay import webapp
 
-WEB = Path(__file__).resolve().parents[1] / "bci_sys" / "web"
+WEB = Path(__file__).resolve().parents[1] / "src" / "bci_sys" / "web"
 
 
 def test_index_contains_all_eight_phase_screens_and_controls():
@@ -2980,7 +2980,7 @@ Expected: FAIL（占位文件缺所有 id/契约串）
   <span id="ws-dot" class="dot"></span>
 </div>
 <main>
-  <div id="replay-bar">
+  <div id="replay-bar" class="hidden">
     <button id="btn-replay-play" class="ghostbtn">▶ 播放</button>
     <input id="replay-seek" type="range" min="0" max="0" value="0" step="1">
     <span id="replay-time" class="sub" style="min-width:120px">00:00 / 00:00</span>
@@ -3043,6 +3043,7 @@ Expected: FAIL（占位文件缺所有 id/契约串）
   <section id="screen-finished" class="screen panel hidden">
     <h2>会话完成</h2>
     <div class="kv" id="finished-kv"></div>
+    <div class="kv" id="finished-rundir" style="display:none"></div>
     <table class="rates">
       <tbody id="rates-body">
       <tr id="rates-head"><th>block</th></tr>
@@ -3102,7 +3103,7 @@ let S = freshState();
 let restEndsAt = 0, restTimer = null;
 
 // ---------- WS（live） ----------
-let ws = null, lastSeq = 0, wsShouldRun = true, reconnectMs = 300;
+let ws = null, lastSeq = 0, wsShouldRun = true, reconnectMs = 300, reconnectTimer = null;
 
 function connectWs() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -3128,18 +3129,26 @@ function connectWs() {
   };
   ws.onclose = () => {
     $("ws-dot").className = "off dot";
-    if (wsShouldRun) setTimeout(connectWs, reconnectMs);
+    scheduleReconnect();  // 重连唯一入口；终态后 wsShouldRun=false 自动不排
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 function scheduleReconnect() {
   if (!wsShouldRun) return;
-  try { ws.close(); } catch (e) {}
-  setTimeout(connectWs, reconnectMs);
+  try { ws.close(); } catch (e) {}  // 已 CLOSED 时 close() 是空操作，不会重复触发
+  // 去重：消息路径关流与随之而来的 onclose 都会进本函数，只保留一个挂起重连
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectWs, reconnectMs);
 }
 
 // ---------- 状态应用（live 帧与 replay 帧共用） ----------
 function applySnapshot(m) {
+  if (m.block_idx != null && m.block_idx !== S.blockIdx) {
+    // 重连追平时已跨块：本块计数从 0 重新累计（snapshot 不携带本块分母，
+    // 历史分母不可重建；同块内重连则保留断线前计数，gap 期间帧不可追回）
+    S.blockValid = 0; S.blockHit = 0; S.verdict = null;
+    document.body.classList.remove("invalid");
+  }
   S.phase = m.phase;
   S.blockIdx = m.block_idx;
   S.segInBlock = m.seg_in_phase || 0;
@@ -3372,8 +3381,10 @@ function renderFinished() {
   } else { wall = "—"; data = S.t1 ?? "—"; }
   $("finished-kv").innerHTML =
     `会话完成 · sub-${S.subj ?? "001"} · 数据 <b>${data}s</b>` +
-    ` / 墙钟 <b>${typeof wall === "number" ? wall.toFixed(1) : wall}s</b><br>` +
-    (S.runDir ? `产物目录：<b>${S.runDir}</b>` : "");
+    ` / 墙钟 <b>${typeof wall === "number" ? wall.toFixed(1) : wall}s</b>`;
+  const rd = $("finished-rundir");
+  if (S.runDir) { rd.style.display = ""; rd.textContent = `产物目录：${S.runDir}`; }
+  else { rd.style.display = "none"; }
 }
 
 function renderAborted() {
@@ -3392,6 +3403,7 @@ const RP = { meta: null, frames: [], offs: [], boundaries: [],
 
 async function bootReplay(file) {
   document.body.classList.add("replay");
+  document.querySelectorAll(".abortbtn").forEach((b) => { b.style.display = "none"; });
   $("replay-bar").classList.remove("hidden");
   wsShouldRun = false;
   $("ws-dot").className = "dot";
@@ -3443,6 +3455,7 @@ function resetReplayState() {
   const subj = S.subj, vhdr = S.dataVhdr, mode = S.mode;
   S = freshState();
   S.mode = mode; S.subj = subj; S.dataVhdr = vhdr; S.params = RP.meta.params;
+  document.body.classList.remove("invalid");
 }
 function replaySeekTo(wallMs) {
   // 吸附到该时刻或之前最近相位边界，从头 reduce 重建 snapshot（与后端口径一致）
@@ -3495,7 +3508,7 @@ function onStart() {
 }
 async function doAbort() {
   const r = await fetch("/api/abort", { method: "POST" });
-  if (!r.ok && r.status !== 202) alert("中止请求失败：" + r.status);
+  if (!r.ok) alert("中止请求失败：" + r.status);  // 202 Accepted 属成功，不报警
 }
 
 boot();
@@ -3520,6 +3533,19 @@ git commit -m "feat(it4): 八相位单页——WS snapshot 重连/无效暂停/�
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
+
+> **执行记录（2026-09-17）**：首提交 7a635dc（3 文件 +649：3 测试 → 147 passed）；
+> 质量门修复 aec8898（+21/−8）：① **Critical** 重连定时器倍增——onclose 不再自排
+> 定时器，重连唯一入口 scheduleReconnect + 模块级 reconnectTimer/clearTimeout 去重
+> （消息路径关流触发的 onclose 二次进入会杀掉前一个挂起，净剩 1 个）；
+> ② applySnapshot 检测 block_idx 跳变时清零本块计数（snapshot 不携带本块分母，
+> 历史不可重建；同块内重连保留计数，gap 帧不可追回）；③ replay-bar 默认 hidden
+> 防首屏 FOUC；④ doAbort 去掉恒假的 `!==202` 条件；⑤ runDir 改 #finished-rundir
+> textContent 节点，不进 innerHTML；⑥ replay 隐藏全部 .abortbtn（只读体感，后端
+> 本就 403）；⑦ resetReplayState 清 body.invalid。**裁定驳回**：审查建议第二标签页
+> 收到 429 后停止重连——驳回，倍增修复后仅 300ms 一次单连接轮询，第一页关闭后第二
+> 页应能自动接班，这是既定语义。另：计划测试 WEB 路径笔误（parents[1] 缺 src 段）
+> 已在派发前修正。修复后 node --check 通过、**147 passed / 0 skipped / boundary 3**。
 ---
 
 ### Task 8: feedback_cli（入口/退出码/console script）
