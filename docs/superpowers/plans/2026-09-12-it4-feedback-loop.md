@@ -4135,7 +4135,7 @@ uv run feedback-loop --replay outputs/feedback/sub-001/<Step4的run_id>
 - 暂停/继续、拖动吸附相位边界（block 起点/冻结/rest）后画面状态正确；
 - 截图 `09-replay.png`；确认 replay 期间 `outputs/` 无新目录产生。
 
-- [ ] **Step 6: 更新 evidence/README.md 并提交**
+- [x] **Step 6: 更新 evidence/README.md 并提交**
 
 IT4 节包含：命令、Step2 实测数值表（b/thr/n/cal_rate/六块率/invalid/n_valid）、
 A4 sha256 与 cmp 结果、run.json 关键字段、9 张截图引用、replay 说明
@@ -4151,7 +4151,7 @@ git commit -m "evidence(it4): 全量留证——八相位截图/实测数值表/
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 7: 完成判据对照（spec §10）**
+- [x] **Step 7: 完成判据对照（spec §10）**
 
 - [x] 程序可启动、浏览器看得到 S3→六块全程实时反馈与 QC 暂停
 - [x] jsonl 可独立重算（T5 test_independent_recompute）并驱动网页回放（T6/T7）
