@@ -4101,7 +4101,7 @@ cmp e:/tmp/it4_a/feedback/sub-001/fixed/feedback.jsonl \
 ```
 Expected: 打印 `BYTE-IDENTICAL`。
 
-- [ ] **Step 4: 人工 live 走查（用户执行，约 17 分钟真墙钟）**
+- [x] **Step 4: 人工 live 走查（用户执行，约 17 分钟真墙钟）**
 
 Run（终端只打印 URL，不自动开浏览器）：
 ```bash
@@ -4126,7 +4126,7 @@ k/t1 定格、run.json status=aborted、文件仍在）。
 关页不中止：block 中直接关标签页，终端进程与 jsonl 继续增长；重开页面经 snapshot
 追平（截图或终端行数口述记录）。
 
-- [ ] **Step 5: 人工 replay 走查（用户执行）**
+- [x] **Step 5: 人工 replay 走查（用户执行）**
 
 ```bash
 uv run feedback-loop --replay outputs/feedback/sub-001/<Step4的run_id>
@@ -4223,7 +4223,69 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 > - 遗留登记（非本迭代引入，最终分支审查评估）：ws.close(code=429) 的 429 不是
 >   RFC6455 合法 close code，严格 WS 客户端（websockets 库）见之抛 1006/ProtocolError；
 >   影响面仅"同时双开第二标签"的拒绝形态，浏览器单页正常路径不触发。
-> - 修复后完整重跑 walk.mjs（01–10 截图、abort 会话 rc=130/run.json、replay seek
->   与零写入）结果：走查完成后回填本节，随后 Step 6 evidence README 入库。
+> **执行记录（2026-09-18，walk 二跑暴露终态关停竞态；第三轮修复 7052b70 + 质量门 6b1ed93，161→163→164）**：
+>
+> - walk 二跑（run 20260918-100853，真 1× 墙钟）01–06 再次全对（关页 15s jsonl
+>   625→700 行继续增长、重连剩余 01:56→01:39、rest 上一块 75.2%），但 07 finished 屏
+>   「数据 840s / 墙钟 —s」、产物路径空，session A 服务器在退出窗内不退出。根因三因叠加：
+>   ① watcher 引擎线程一结束即置 should_exit，uvicorn 0.1s 内 shutdown 关掉 listening
+>   socket，浏览器此刻才收到 final 帧，fetch /api/run 被拒进 catch（墙钟/路径留 "—"）；
+>   ② headless 关 context 发 TCP RST（srvA.log WinError 10054），ASGI disconnect 不保证投递；
+>   ③ Starlette WebSocket 仅在 receive()/send() await 点感知断开，终态后不再 send，
+>   uvicorn 默认 timeout_graceful_shutdown=None 对活动 WS 无限等。
+> - 修复 7052b70（三层联动 + 前端次序，缺一不可）：
+>   ① **终态契约**：feedback_engine 抽 `write_run_json()`，在 publish final/aborted 帧
+>   **之前**写完 run.json——浏览器收到终态帧后 GET /api/run 必读到完整文件；
+>   ② **寿命语义**：服务器仅在「引擎终态 **且** 无观看者 WS」（app.state.ws_taken=False）
+>   时退出；watcher 先轮询等 runner._t（10ms×3000，超时 stderr 留痕）再 join，终态后
+>   每 0.05s 真墙钟轮询 ws_taken，驻留上限 linger 10s（注入 `_terminal_linger_sec`，
+>   生产用真 time.sleep，不与注入快放钟混用）；
+>   ③ **双层兜底**：uvicorn Config(timeout_graceful_shutdown=5)（live + replay 两构造点，
+>   注入 `_graceful_shutdown_sec`），WS 永不关也在 linger+graceful 上限内 rc=0 退出；
+>   ④ **前端次序**：onmessage 收 final/aborted（仅 live）先 `fetchRunInfo()` 再
+>   `ws.close()`（.finally 里关），applyEvent 内重复 fetch 删除（静态契约区间同步更新）。
+> - 新增 2 个真 uvicorn 集成测试（port=0 + websockets 客户端 + 快放时钟）：终态帧后
+>   WS 不关时 GET /api/run 立即 200 且字段齐（data_elapsed_s=840.0）、2s 内服务器仍
+>   alive、关连接后 10s 内线程退出；WS 永不关时 linger=0.3/graceful=1 注入下上限内
+>   rc=0。全量 **163 passed**/0，boundary 3。
+> - A4 复验：快放双跑 jsonl 仍各 **1,024,560 字节 / 4225 行**、双跑 sha 相等；与
+>   9726c48 时代双跑（整文件 sha 前缀 10e6ac5d）去 meta 行 `tail -n +2 | cmp` =
+>   4224 数据行**逐字节相同**。**注（防误报）**：整文件 sha 跨提交必变，只因 meta 行
+>   设计字段 `git_commit`（9726c48-dirty→7052b70-dirty）；A4 契约是同代码版本双跑字节
+>   一致，数据行跨版本亦零变化。
+> - 规格门 ✅。质量门首轮 CHANGES REQUESTED（0C/2I/3M/1可选，全部采纳）→ 6b1ed93：
+>   I① run.json 删函数末尾第二次写入（-18 行），四条终态出口（正常 finish；_Stop＝
+>   wall_cap/incomplete_data/S4 user_abort/rest cap；engine_error；S3 期 user_abort、
+>   freeze_failed、S3 wall_cap）穷举汇流到 publish 前单写，字段集合完整；
+>   I② api_run 读 run.json 的 except 扩 `(OSError, json.JSONDecodeError)`——Windows
+>   write_text 非原子，终态瞬间 GET 最密可能读半截 JSON，回退 extra={} 不 500；
+>   M③ replay 构造点补传 graceful（live/replay 注入对称）；M④ 两集成测试未用 holder 改 `_`；
+>   M⑤ 新增接线锁测试 test_runner_factory_wiring_passes_app_and_linger_to_watcher
+>   （monkeypatch 截获 watcher 实参：app 有 state、注入 7.5 透传而非默认 10.0、rc=1；
+>   红相实证：生产接线临时写死 10.0 → AssertionError L233）；
+>   可选⑥ linger 循环收进 started 分支（30s 未 start 不 linger）。全量 **164 passed**/0，
+>   boundary 3、node --check OK，复审 APPROVED。（控制器注：6b1ed93 由 bea44d8 amend
+>   Co-Authored-By trailer 而来，代码内容字节未变；历史 0a3c3f8/c56de9a/7052b70 三提交
+>   的 trailer 误署模型名，留最终分支收尾时一并评估。）
+>
+> - **修复后完整重跑 walk.mjs（2026-09-18 04:07–04:26，无头 Edge 自动走查，真墙钟、
+>   真点击，进程 exit 0）三会话全部通过**：
+>   - session A（run 20260918-120725）：01–06、10 重拍；block 中关页 15s jsonl
+>     625→700 行继续增长，重连 snapshot 追平（剩余 01:56→01:39）；07 finished 屏
+>     「数据 **840s / 墙钟 993.0s**」、产物目录 outputs/feedback/sub-001/20260918-120725、
+>     六率 75.2/87.3/79.9/83.2/81.0/88.2% 与无效段 43/41/57/71/85/108 同锁死值；
+>     **浏览器收 final 后服务器秒退 rc=0**（二跑两症状均消失）。run.json：status=ok、
+>     wall_elapsed_s=993.001、data_elapsed_s=840、rate_ratio=0.8459、600/3600、
+>     block_rates 齐、git_commit=6b1ed93-dirty。
+>   - session B（run 20260918-122404）：block 1（k=700，t1=140.2s）点「中止会话」→
+>     08-aborted.png；进程 **rc=130**；run.json status=aborted / reason=user_abort
+>     （wall 143.201s、data 140.2s、rate_ratio 0.979、n_running_seg=101），产物
+>     feedback.jsonl + run.json 均保留不删除（D3）。
+>   - session C（--replay runA）：金色徽标「回放模式（只读，不落盘）」+ 控制条可见；
+>     seek 120000→冻结卡、250000→rest、200000→block（02:03 / 16:33）三吸附正确；
+>     按钮 ⏸ 暂停 → ▶ 继续切换正确；09-replay.png；replay 前后 outputs/ 目录一致
+>     （零写入）。
+>   - 截图来源声明：10 张全部由 playwright-core 驱动系统无头 Edge 153 自动点击/截图
+>     生成（真页面真墙钟，非人工摆拍、非伪造）；脚本 e:/tmp/it4_pw/walk.mjs 不进仓库。
 
 <!-- APPEND-MARKER -->
