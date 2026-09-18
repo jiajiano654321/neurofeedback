@@ -2181,12 +2181,18 @@ class FeedbackRunner:
                 subj=self.subj, root=self.root, out_root=self.out_root,
                 run_id=self.run_id, abort_event=self.abort, bus=self.bus,
                 chans=self.chans, **kwargs)
-        except Exception:
+        except BaseException:
+            # T9 走查准备期修正（350e8a1）：扩到 BaseException——KeyboardInterrupt/
+            # SystemExit 也必须落 engine_error 终态，不能让引擎线程静默死亡后
+            # outcome 留 None（watcher 会因此误判正常结束、服务器无声退出）。
+            # 引擎的唯一合法中止通道是 abort Event（主循环自行轮询），不是信号。
             traceback.print_exc()
             self.outcome = {"status": "aborted", "reason": "engine_error",
                             "run_dir": self.run_dir}
 
     def join(self, timeout=None) -> None:
+        # 注意：start() 前 _t is None 时静默立即返回。调用方（CLI watcher）
+        # 必须先确认 start 已发生，见 feedback_cli._watch_runner_then_stop_server。
         if self._t is not None:
             self._t.join(timeout)
 
@@ -2508,7 +2514,9 @@ Expected: FAIL（`ModuleNotFoundError: webapp`；静态文件 404）
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import queue
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
@@ -2523,6 +2531,11 @@ _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # 纯墙钟时长（数据钟暂停段），ms 形式供 offsets 计算；单一来源 config，禁止再硬编码
 _CARD_MS = int(config.FEEDBACK_FREEZE_CARD_SEC * 1000)
 _REST_MS = int(config.FEEDBACK_REST_SEC * 1000)
+# T9 真服务器走查修正（0a3c3f8+c56de9a）：WS 桥接队列轮询间隔。
+# 有帧时 q.get 立即返回（零额外延迟），空队列时每该值回事件循环一次，
+# 使客户端断开与 uvicorn 优雅关闭都能被感知；空转 CPU 可忽略，
+# 断连感知（含单连接名额释放）延迟上限即该值。
+_WS_QUEUE_POLL_SEC = 0.5
 
 
 # ---------------- replay：jsonl → 同协议帧 + 墙钟偏移（只算不落盘） ----------------
@@ -2736,6 +2749,19 @@ def create_app(
                 return
             app.state.ws_taken = True
             await ws.accept()
+
+            # T9 真服务器走查修正（0a3c3f8）：后台 receive 哨兵。
+            # 协议是服务端单向推流，正常路径从不 receive；Starlette 的 WebSocket
+            # 只在 receive()/send() await 点感知对端关闭。终态后不再 send，
+            # 没有这个任务就永远发现不了客户端断开——协程不退、连接计数不归零，
+            # uvicorn 默认无限 graceful shutdown 会永久挂住（TestClient 不暴露）。
+            async def _recv_sentinel():
+                """感知客户端断开：只 receive 不处理消息，连接关闭时以
+                WebSocketDisconnect 退出，供主循环检查。"""
+                while True:
+                    await ws.receive_text()
+
+            recv_task = asyncio.create_task(_recv_sentinel())
             try:
                 runner = app.state.runner
                 if runner is not None and runner.bus.snapshot is not None:
@@ -2744,17 +2770,34 @@ def create_app(
                 else:
                     await ws.send_json({"seq": 0, "msg": eng.initial_snapshot()})
                 while True:
+                    if recv_task.done():
+                        # recv_task 退出说明客户端已断开（WebSocketDisconnect
+                        # 会被外层 except 捕获；任何其他异常也同样冒泡）
+                        recv_task.result()
+                        break
                     runner = app.state.runner  # start 可能发生在连接之后
                     if runner is None:
                         await asyncio.sleep(0.1)  # 引擎未启动：只等不占队列
                         continue
-                    # q.get 是阻塞调用，经线程池桥接（单连接，最多占一个 worker）
-                    env = await run_in_threadpool(runner.bus.q.get)
+                    # 超时轮询代替纯阻塞 q.get：终态后队列永久为空，纯阻塞会把协程
+                    # 钉死在 run_in_threadpool 的线程池 worker 上，断开与关闭都无法
+                    # 推进。正常帧零额外延迟；无帧定期回循环配合 recv_task 感知断开。
+                    # queue.Empty 经 run_in_threadpool 从 worker 线程原样回传。
+                    try:
+                        env = await run_in_threadpool(
+                            lambda: runner.bus.q.get(timeout=_WS_QUEUE_POLL_SEC))
+                    except queue.Empty:
+                        continue
                     await ws.send_json(env)
                     # 终态帧送完后连接挂起等前端关闭；引擎线程已结束，不影响落盘
             except WebSocketDisconnect:
                 pass
             finally:
+                # 先 cancel 再 await 取回：防止任务异常 never-retrieved 与 task 泄漏；
+                # suppress 的只有「取消」与「正常断开」两种预期退出，其他异常照常冒泡。
+                recv_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await recv_task
                 app.state.ws_taken = False  # 断开不中止引擎，只释放连接名额
 
     else:  # replay
@@ -3219,8 +3262,16 @@ function applyEvent(f) {
   }
 }
 
+// T9 真服务器走查修正（0a3c3f8）：原计划即规定终态后重拉，但 T7 实现漏掉
+// （boot 只拉一次），契约测试也未钉 → finished 屏墙钟永远 "—s"。本函数回归；
+// 注意必须在 await 回来后显式 render()——本处是 fire-and-forget，不重绘则
+// 重拉到的 wall_elapsed_s/产物路径不会上屏（replay 分支用 offsets 算时长，
+// 调用点已用 S.mode==="live" 守卫，不触发本函数）。
 async function fetchRunInfo() {
-  try { S.runInfo = await (await fetch("/api/run")).json(); } catch (e) {}
+  try {
+    S.runInfo = await (await fetch("/api/run")).json();
+    render();
+  } catch (e) {}  // 重拉失败保持 boot 时的旧值（屏上显 "—"），不炸终态
 }
 
 // ---------- 渲染 ----------
@@ -3738,6 +3789,32 @@ from . import webapp
 _ALL_CH = (config.TARGET.channel, *config.EOG_PROXY_CHANNELS)
 
 
+def _watch_runner_then_stop_server(server, runner) -> None:
+    """等 runner 真正 start（_t 被赋值）后再 join，结束后令 server 退出。
+
+    T9 走查准备期修正（350e8a1）。为什么要等 start：api_start 在
+    runner_factory 返回之后才调 runner.start()，而 factory 里就起了 watch
+    守护线程。若 watch 在 start 前调 join，FeedbackRunner.join 因 self._t is
+    None 会**立即**返回 → 服务器还没开跑就被 should_exit 关掉 → CLI 兜底把
+    outcome 还 None 的 runner abort 掉，引擎刚启动在 k=0 就落 user_abort
+    （启动竞态；uvicorn 真实路径每次必现，TestClient 调度相反故测试从未暴露）。
+    """
+    # 轮询等 _t 被赋值（start() 才会做）；间隔 10ms，最多等 30s（极端慢启动兜底）
+    started = False
+    for _ in range(3000):
+        if runner._t is not None:
+            started = True
+            break
+        time.sleep(0.01)
+    if not started:
+        print("[watcher] runner 在 30s 内未 start，按未启动关停服务器",
+              file=sys.stderr)
+    runner.join()  # 超时未 start 时 join 必立即返回，保留统一出口
+    # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
+    # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
+    server.should_exit = True
+
+
 def _rc(status: str | None, reason: str | None) -> int:
     """spec §5.2 退出码映射。"""
     if status == "ok":
@@ -3772,13 +3849,18 @@ class _FaultRunner:
         self.abort = threading.Event()
         self.outcome = None
         self.run_dir = ""
+        self._t = None  # 与 FeedbackRunner 接口对齐：start 前为 None
 
     def start(self, **_k):
+        self._t = object()  # 标记已 start（watcher 轮询等的就是这个）
         self.outcome = {"status": "aborted", "reason": "engine_error",
                         "run_dir": self.run_dir}
 
     def join(self, timeout=None):
-        pass
+        # 与 FeedbackRunner.join 同构：start() 前 _t is None 直接返回；
+        # start() 同步置终态，故 start 后 join 也立即返回
+        if self._t is None:
+            return
 
 
 def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
@@ -3823,12 +3905,10 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
             # 测试注入快放时钟（生产路径两个都是 None → 真墙钟）
             r._sleep_fn, r._clock = _sleep_fn, _clock
         registry["r"] = r
-        def watch():
-            r.join()
-            # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
-            # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
-            server.should_exit = True
-        threading.Thread(target=watch, daemon=True).start()
+        # 等 start 后再 join：模块级 _watch_runner_then_stop_server 消除启动竞态
+        threading.Thread(
+            target=_watch_runner_then_stop_server, args=(server, r), daemon=True,
+        ).start()
         return r
 
     app = webapp.create_app(subj=args.subj, data_root=args.data_root,
@@ -3915,6 +3995,22 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 > ③ 截断魔数 2000×50 补注释（600 校准+600 一块后耗尽 → incomplete_data 而非 freeze_failed），
 > 并加强断言 run.json `status=="aborted" and reason=="incomplete_data"`；测试顶层改 `import json` 替换内联 `__import__`。
 > 润色后复跑 CLI 9/9（9.13s）、全量 156/0（48.85s）、boundary 3。
+>
+> **执行记录（2026-09-17，T9 真服务器走查准备期追加修复，156→158）**：
+> 真生产入口（uvicorn 主线程，非 TestClient）首跑暴露**启动竞态**：runner_factory
+> 内起的 watch 守护线程在 `runner.start()` 之前就 join——FeedbackRunner.join 在
+> `self._t is None` 时静默立即返回 → watch 立刻置 should_exit，服务器开跑即在
+> k=0 被 CLI 兜底 abort（run.json=aborted/user_abort，墙钟 0.4s）。TestClient
+> 主线程同步 POST 的调度次序相反（start 总先于 watch 被调度），故全套测试从未暴露。
+> 修复 350e8a1：模块级 `_watch_runner_then_stop_server`——轮询等 `runner._t`
+> 被赋值（10ms×3000，超时 stderr 留痕仍走统一出口）再 join；引擎线程 `_target`
+> 的 `except Exception` 扩为 `except BaseException`（KeyboardInterrupt/SystemExit
+> 也落 engine_error，杜绝静默死亡）。+2 测试（StubRunner 验证 start 前 should_exit
+> 不被置；monkeypatch KeyboardInterrupt 验证落 engine_error）。
+> 双门：规格 ✅（0/0/0+3 建议，超时留痕与 import 归位采纳为 e5e6a1c）；
+> 质量 ✅ APPROVED（1 Important：_FaultRunner.join 契约漂移，采纳为 8def6dc——
+> 假替身 join 与真实 join 同构 `_t is None` 直接返回；50ms sleep 时序裁定保留）。
+> 全量 **158 passed**/0（50.97s、52.20s 两跑）、boundary 3。
 
 ---
 
@@ -3922,6 +4018,13 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 无新代码。自动化部分由实现者完成；**人工浏览器走查由用户执行**（subagent 不替点、
 不伪造截图）。截图是证据不是程序产物（spec §10：程序产物只有 jsonl/run.json/网页）。
+
+> **执行方式变更（2026-09-17，用户授权）**：用户明确授权控制器自行完成 Steps 4–5
+> 走查（"你自己跑可以么"）。实施方式 = 系统无头 Edge（channel=msedge，headless）
+> + playwright-core 驱动**真生产 CLI**（uvicorn 主线程、真 1× 墙钟、真点击/关页/
+> seek/中止），截图由浏览器真实渲染写出（PNG 元数据可溯），**不是合成/手绘/替身**。
+> 走查脚本在 e:/tmp/it4_pw/walk.mjs（不进仓库）；与"人工执行"的唯一差别是输入
+> 设备与有无真人盯屏，核对单逐项以 DOM 断言 + 截图双留证。
 
 **Files:**
 - Modify: `evidence/README.md`（新增 IT4 节，沿 IT3 形态）
@@ -4079,6 +4182,48 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 > - 环境注记：诊断脚本直连引擎、不经 CLI 的 stdout reconfigure，cp936 控制台须
 >   `PYTHONUTF8=1 PYTHONIOENCODING=utf-8` 运行，否则引擎 µ 打印 UnicodeEncodeError（Step 2 命令已更正）。
 >
-> Steps 4–6（人工 live/replay 走查、9 张截图、evidence README）由**用户本人**执行，完成后补记。
+> Steps 4–6 原计划由用户本人执行；2026-09-17 用户授权改由控制器以无头 Edge
+> 自动走查（见 Task 9 文首注记），完成后补记。
+>
+> **执行记录（2026-09-17/18，Steps 4–5 无头走查 + 两个走查缺陷修复，158→161）**：
+>
+> - 走查工具栈：node v24 + playwright-core（e:/tmp/it4_pw，npmmirror，不进仓库）+
+>   系统 Edge 153 `chromium.launch({channel:'msedge', headless:true})`；Node spawn
+>   venv python `-m bci_sys.replay.feedback_cli`（detached/windowsHide）= 真生产入口。
+> - **首跑（run 20260917-203952，真 1× 墙钟）01–06 全对**：confirm 参数齐、校准
+>   灰格/计时、freeze 数值与 Step 2 一致、block 绿 chip/80% 刻线/黄阈值、无效段
+>   斜纹+红 chip「✕ 无效段 · 反馈暂停（L3）」+横幅且 15/19 分子分母定格、rest
+>   数据钟暂停且上一块 75.2% 仅记录。关页 15s 不中止（jsonl 626→701 行继续增长），
+>   重连经 snapshot 追平（剩余 01:55→01:39）。
+> - **缺陷①（finished 屏）**：07 截图「数据 840s / 墙钟 —s」、无产物路径。根因：
+>   原计划本规定终态后重拉 /api/run（fetchRunInfo），T7 实现漏掉且静态契约测试未钉，
+>   boot 唯一一次 GET 时会话未终态、无墙钟字段。修复 0a3c3f8（前端）：final/aborted
+>   仅 live 分支 fire fetchRunInfo，await 回来显式 render()（replay 用 offsets 算时长，
+>   mode 守卫不触发）；失败 catch 保持 "—"。新增静态契约 + 终态 /api/run 字段两测试。
+> - **缺陷②（终态挂死服务器）**：真 uvicorn 下 WS 客户端收 final 后关闭连接，
+>   server.run() 永不返回、进程不退（无 WS 快放对照 rc=0/2.9s，有 WS 永久 alive）。
+>   根因：ws_bridge 永久阻塞 `run_in_threadpool(bus.q.get)`，终态后队列永空、协程
+>   不回事件循环；Starlette 只在 receive()/send() await 点感知断开，而终态后不再
+>   send，uvicorn 默认 timeout_graceful_shutdown=None 无限等连接。修复 0a3c3f8
+>   （后端，双机制缺一不可）：q.get(timeout=_WS_QUEUE_POLL_SEC=0.5) 空队列定期回
+>   循环（queue.Empty 经线程池原样回传；正常帧零延迟）+ 后台 _recv_sentinel
+>   receive_text 任务感知断开（运行期关页最坏 0.5s 释放 ws_taken，重连可接班；
+>   优雅关闭得以推进）。新增真 uvicorn Server（port=0）+ websockets 客户端 +
+>   快放时钟集成测试，红相旧码实测 19.74s alive。
+> - pyproject dev 显式 `websockets>=12`（本随 uvicorn 在树）；uv.lock 补提 e1e28d8。
+> - 双门：规格 ✅ SPEC COMPLIANT（头号风险"运行期关页名额释放"经审查员真服务器
+>   实证：关页后 0.5s 内第二连接可接，修复前要等引擎终态）；质量门首轮 1 Important
+>   （finally 只 cancel 不 await → 边角路径 task 异常 never-retrieved）+6 Minor 采纳
+>   修复为 c56de9a（suppress await 清理、import 分组、跨线程注释、轮询常量命名、
+>   port=0 取代手动递增端口、快放时钟 docstring、契约测试区间改到下一 function），
+>   复审 APPROVED；fetchRunInfo/boot 轻度重复裁定保留。
+> - 控制器独立复验：e:/tmp/it4_pw/diag_natural_exit_ws.py（快放真 server + WS
+>   收 final 保持 2s 关闭）→ 服务线程 alive=**False**、rc=**0**（修复前 alive=True
+>   永不退）；快放 rates/b/θ_thr 与 Step 2 逐项一致。全量 **161 passed**/0、boundary 3。
+> - 遗留登记（非本迭代引入，最终分支审查评估）：ws.close(code=429) 的 429 不是
+>   RFC6455 合法 close code，严格 WS 客户端（websockets 库）见之抛 1006/ProtocolError；
+>   影响面仅"同时双开第二标签"的拒绝形态，浏览器单页正常路径不触发。
+> - 修复后完整重跑 walk.mjs（01–10 截图、abort 会话 rc=130/run.json、replay seek
+>   与零写入）结果：走查完成后回填本节，随后 Step 6 evidence README 入库。
 
 <!-- APPEND-MARKER -->
