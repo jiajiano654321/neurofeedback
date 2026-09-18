@@ -122,6 +122,17 @@ class EventBus:
             snap["dropped"] = self.dropped
             self.snapshot = snap
 
+    def snapshot_pair(self) -> tuple[int, dict | None]:
+        """锁内一致地返回 (当前 seq, 最新 snapshot)。
+
+        Web 层连接追平时必须一次读出：publish 在同一把锁内先自增 seq、
+        末尾才赋 self.snapshot，两次独立无锁属性读之间存在撕裂窗口，
+        可能发出 {seq:N+1, msg:snapshot_N}。snapshot 无需拷贝——发布侧
+        每帧新建 dict，读取侧只读。
+        """
+        with self._lock:
+            return self.seq, self.snapshot
+
 
 def _interruptible_wait(seconds: float, abort_event, sleep_fn, step: float = 0.2) -> bool:
     """片长 ≤step 的可中止等待（中止响应 ≤200ms，spec §3）。True=走完，False=被中止。"""

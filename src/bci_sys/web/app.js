@@ -60,8 +60,16 @@ function connectWs() {
       }
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     $("ws-dot").className = "off dot";
+    if (ev.code === 1013) {
+      // 1013 Try Again Later：已有另一个标签页占着本会话的唯一观看名额。
+      // 停止重连（否则被拒页每 300ms 撞一次），就地提示用户，ws-dot 保持 off。
+      wsShouldRun = false;
+      clearTimeout(reconnectTimer);
+      $("ws-dup-banner").classList.remove("hidden");
+      return;
+    }
     scheduleReconnect();  // 重连唯一入口；终态后 wsShouldRun=false 自动不排
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };

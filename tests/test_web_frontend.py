@@ -78,6 +78,50 @@ def test_app_js_final_state_refreshes_run_info_and_rerenders():
         "fetchRunInfo 必须在 ws.close 之前调用（WS 连着才能 GET 到 /api/run）"
 
 
+def test_app_js_onclose_1013_branch_stops_reconnect_and_shows_banner():
+    """I-2：第二标签页被服务端以 1013 拒绝时，onclose 必须停掉重连风暴
+    （wsShouldRun=false、不调 scheduleReconnect）并显示用户可见横幅；
+    其他关闭码仍走 scheduleReconnect。区间提取以下一个处理器 ws.onerror
+    为右边界，1013 分支体用大括号配平提取，不钉固定行号。"""
+    js = (WEB / "app.js").read_text("utf-8")
+    start = js.index("ws.onclose =")
+    end = js.index("ws.onerror =", start)
+    region = js[start:end]
+    assert "(ev)" in region, "onclose 必须接收关闭事件以读取 ev.code"
+    assert "ev.code === 1013" in region
+    # 大括号配平提取 1013 分支体
+    cond = region.index("ev.code === 1013")
+    brace0 = region.index("{", cond)
+    depth = 0
+    close = None
+    for i in range(brace0, len(region)):
+        if region[i] == "{":
+            depth += 1
+        elif region[i] == "}":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    assert close is not None, "1013 分支必须有完整大括号体"
+    branch = region[brace0:close + 1]
+    assert "scheduleReconnect" not in branch, "1013 分支不得发起重连"
+    assert "wsShouldRun = false" in branch
+    assert "ws-dup-banner" in branch, "1013 分支必须显示用户可见提示横幅"
+    # 普通关闭的唯一重连入口仍在 onclose 区间内（不能因修 1013 被整体删掉）
+    assert "scheduleReconnect" in region
+
+
+def test_index_contains_duplicate_viewer_banner_hidden_by_default():
+    """I-2：页面必须含默认隐藏的“已有另一个标签页”提示横幅，文案中文可见。"""
+    import re
+    html = (WEB / "index.html").read_text("utf-8")
+    m = re.search(r'<div id="ws-dup-banner"[^>]*>', html)
+    assert m, "index.html 必须含 id=ws-dup-banner 的横幅元素"
+    assert "hidden" in m.group(0), "横幅默认必须隐藏（带 hidden class）"
+    assert "已有另一个标签页连着本会话" in html
+    assert "关闭那个标签页后刷新本页即可恢复" in html
+
+
 def test_static_served_via_app():
     with TestClient(webapp.create_app()) as c:
         assert c.get("/").headers["content-type"].startswith("text/html")

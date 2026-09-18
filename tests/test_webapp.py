@@ -1,5 +1,5 @@
-"""IT4 Web 层（spec §6）：静态页、单连接 WS+snapshot、start/abort、429/409、
-replay 白名单与帧字段一致、reducer/seek、断 WS 引擎继续。"""
+"""IT4 Web 层（spec §6）：静态页、单连接 WS+snapshot、start/abort、1013/409、
+replay 白名单与帧字段一致、reducer/seek、断 WS 引擎继续、snapshot 后丢弃陈旧帧。"""
 import json
 import threading
 import time
@@ -64,6 +64,16 @@ class FakeRunner:
         self._go.set()
 
 
+class _ManualRunner(FakeRunner):
+    """不起脚本线程的桩：帧由测试自己 _pub，精确控制连接前后的发布时刻。"""
+
+    def start(self, **kw):
+        pass  # 故意不起线程
+
+    def join(self, timeout=None):
+        pass
+
+
 @pytest.fixture
 def client():
     runner_holder = {}
@@ -121,17 +131,19 @@ def test_abort_202_while_running_409_before_start_and_after_terminal(client):
     assert c.post("/api/abort").status_code == 409  # 已终态
 
 
-def test_ws_snapshot_first_single_connection_429(client):
+def test_ws_snapshot_first_single_connection_1013(client):
     c, holder = client
     with c.websocket_connect("/ws") as ws:
         env = ws.receive_json()
         assert env["msg"]["type"] == "snapshot"
         assert env["msg"]["mode"] == "live"
         assert env["msg"]["params"]["n_blocks"] == 6
+        # 第二连接必须以 RFC 6455 注册码 1013（Try Again Later）拒绝；
+        # 429 是 HTTP 码、不是合法 WS 关闭码（真 websockets 栈会 ProtocolError）
         with pytest.raises(WebSocketDisconnect) as ei:
             with c.websocket_connect("/ws") as ws2:
                 ws2.receive_json()
-        assert ei.value.code == 429
+        assert ei.value.code == 1013
         # 第一连接仍可用：start 后能逐帧收到
         c.post("/api/start")
         holder["r"].release()
@@ -158,6 +170,52 @@ def test_ws_disconnect_does_not_stop_engine_and_reconnect_resyncs(client):
         env = ws2.receive_json()  # 重连 snapshot 直接追平到最新
         assert env["seq"] == 30
         assert env["msg"]["k"] == 629 and env["msg"]["n_valid"] == 30
+
+
+def test_eventbus_snapshot_pair_is_consistent_under_lock():
+    """I-1：snapshot_pair 必须在锁内一次返回 (seq, snapshot)，消除旧码
+    两次独立无锁属性读（bus.seq / bus.snapshot）之间的撕裂窗口。
+    每发布一帧后，返回的 seq 必须与 snapshot 内嵌 seq 相等。"""
+    bus = eng.EventBus()
+    assert bus.snapshot_pair() == (0, None)  # 从未发布：else 分支发初始 snapshot
+    for i in range(1, 11):
+        bus.publish({"type": "seg", "k": 599 + i},
+                    {**eng.initial_snapshot(), "k": 599 + i})
+        seq, snap = bus.snapshot_pair()
+        assert seq == i
+        assert snap["seq"] == i  # publish 锁内同一次自增赋值，不得读到撕裂对
+    seq, snap = bus.snapshot_pair()
+    assert seq == 10 and snap["seq"] == 10 and snap["k"] == 609
+
+
+def test_ws_snapshot_then_stale_backlog_is_dropped():
+    """I-1 终审回归：无消费者预发 300 帧（队列 256 满、丢最旧 44）后才连 WS。
+    snapshot 必须以 seq=300 追平；队列里 seq<=300 的积压旧帧必须全部丢弃，
+    snapshot 之后客户端收到的第一帧只能是新发布的 seq=301。
+    旧码无过滤直接转发，实测首帧 seq=45 → 前端判定断档 → 重连风暴。"""
+    holder = {}
+
+    def factory(*a, **k):
+        if "r" not in holder:
+            holder["r"] = _ManualRunner(*a, **k)
+        return holder["r"]
+
+    app = webapp.create_app(runner_factory=factory)
+    with TestClient(app) as c:
+        c.post("/api/start")
+        runner = holder["r"]
+        for i in range(300):  # 模拟页面晚开：引擎已独自发了 300 帧
+            runner._pub(i)
+        assert runner.bus.seq == 300
+        assert runner.bus.q.qsize() == 256 and runner.bus.dropped == 44
+        with c.websocket_connect("/ws") as ws:
+            env0 = ws.receive_json()
+            assert env0["msg"]["type"] == "snapshot"
+            assert env0["seq"] == 300
+            runner._pub(300)  # 连接握手后发布的第 301 帧
+            env1 = ws.receive_json()
+            assert env1["seq"] == 301
+            assert env1["msg"]["k"] == 900 and env1["msg"]["type"] == "seg"
 
 
 def _real_run_jsonl(data_root, tmp_path, rid="fixed"):

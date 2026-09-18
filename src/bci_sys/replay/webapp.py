@@ -1,7 +1,7 @@
 """IT4 Web 层（spec §6）：FastAPI app 工厂。
 
 - live：POST /api/start 起引擎 daemon 线程；WS /ws 连接先发 snapshot 再桥接
-  EventBus；单连接（第二连接 429）；WS 断开不中止引擎；关页不中止。
+  EventBus；单连接（第二连接 1013 Try Again Later）；WS 断开不中止引擎；关页不中止。
 - replay：不起引擎、不写文件；GET /api/replay?file= 只允许启动时白名单解析出的
   单一 feedback.jsonl，返回 {meta, frames, offsets_ms, boundaries}，同一前端渲染；
   live 专有 WS/POST 在 replay 模式拒绝（1008/403）。
@@ -238,10 +238,13 @@ def create_app(
 
         @app.websocket("/ws")
         async def ws_bridge(ws: WebSocket):
-            # 单连接：第二连接 accept 后立刻以 429 关闭（跨 Starlette 版本可移植）
+            # 单连接：第二连接 accept 后立刻以 1013 关闭。1013 是 RFC 6455
+            # §7.4.2 注册码（Try Again Later），语义即“已有一个观看者，请稍后
+            # 再试”；429 是 HTTP 状态码、不是合法 WebSocket 关闭码，真实
+            # websockets 栈收到 429 会抛 ProtocolError 并在服务端刷 traceback。
             if getattr(app.state, "ws_taken", False):
                 await ws.accept()
-                await ws.close(code=429)
+                await ws.close(code=1013)
                 return
             app.state.ws_taken = True
             await ws.accept()
@@ -255,9 +258,14 @@ def create_app(
             recv_task = asyncio.create_task(_recv_sentinel())
             try:
                 runner = app.state.runner
-                if runner is not None and runner.bus.snapshot is not None:
-                    await ws.send_json({"seq": runner.bus.seq,
-                                        "msg": runner.bus.snapshot})
+                # seq 与 snapshot 必须锁内一次读出（snapshot_pair），否则两次
+                # 无锁读之间 publish 可能插入，发出 {seq:N+1, msg:snapshot_N}
+                if runner is not None:
+                    last_seq, snap = runner.bus.snapshot_pair()
+                else:
+                    last_seq, snap = 0, None
+                if snap is not None:
+                    await ws.send_json({"seq": last_seq, "msg": snap})
                 else:
                     await ws.send_json({"seq": 0, "msg": eng.initial_snapshot()})
                 while True:
@@ -281,6 +289,13 @@ def create_app(
                             lambda: runner.bus.q.get(timeout=_WS_QUEUE_POLL_SEC))
                     except queue.Empty:
                         continue
+                    # 丢弃 snapshot 追平点之前（含同 seq）的积压帧：页面晚开/
+                    # 重连握手期队列里压的全是旧帧，转发会违反前端
+                    # env.seq===lastSeq+1 契约，触发断档重连风暴（队列满丢最旧
+                    # 只影响积压量，seq 仍单调，新帧 seq 必然 > last_seq）。
+                    if env["seq"] <= last_seq:
+                        continue
+                    last_seq = env["seq"]
                     await ws.send_json(env)
                     # 终态帧送完后连接挂起等前端关闭；引擎线程已结束，不影响落盘
             except WebSocketDisconnect:

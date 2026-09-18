@@ -70,6 +70,10 @@
             text-align:center; background:#3a2424; border:1px solid #7a4040;
             color:#ffb3b3; display:none; }
   body.invalid .banner { display:block; }
+  .dup-banner { margin:0 0 14px; border-radius:8px; padding:11px 14px; font-size:13.5px;
+                text-align:center; background:#3a2424; border:1px solid #7a4040;
+                color:#ffb3b3; }
+  .dup-banner.hidden { display:none; }
   body.invalid .bar-wrap { border:1px solid #7a4040; }
   .rest-title { color:var(--yellow); font-size:20px; font-weight:700;
                 text-align:center; }
@@ -93,6 +97,7 @@
   <span id="ws-dot" class="dot"></span>
 </div>
 <main>
+  <div id="ws-dup-banner" class="dup-banner hidden">已有另一个标签页连着本会话，本页停止直播。关闭那个标签页后刷新本页即可恢复。</div>
   <div id="replay-bar" class="hidden">
     <button id="btn-replay-play" class="ghostbtn">▶ 播放</button>
     <input id="replay-seek" type="range" min="0" max="0" value="0" step="1">
