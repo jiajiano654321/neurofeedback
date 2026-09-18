@@ -195,20 +195,23 @@ def create_app(
         r = app.state.runner
         if r is None:
             return {**info, "status": None, "reason": None, "run_dir": None}
-        outcome = getattr(r, "outcome", None)
-        if outcome is None:
-            return {**info, "status": None, "reason": None,
-                    "run_dir": r.run_dir.replace("\\", "/")}
-        # 终态后回读 run.json：数据/墙钟时长只从这里进浏览器（不进 WS、不进 jsonl）
         run_json_path = Path(r.run_dir) / "run.json"
-        extra = {}
         try:
             extra = json.loads(run_json_path.read_text("utf-8"))
         except OSError:
-            pass
-        return {**info, "status": outcome["status"],
-                "reason": outcome.get("reason"),
-                "run_dir": r.run_dir.replace("\\", "/"), **extra}
+            extra = {}
+        if extra:
+            # run.json 已落盘（终态帧 publish 前写入），直接以文件为准
+            return {**info, "status": extra.get("status"),
+                    "reason": extra.get("reason"),
+                    "run_dir": r.run_dir.replace("\\", "/"), **extra}
+        outcome = getattr(r, "outcome", None)
+        if outcome is not None:
+            return {**info, "status": outcome["status"],
+                    "reason": outcome.get("reason"),
+                    "run_dir": r.run_dir.replace("\\", "/")}
+        return {**info, "status": None, "reason": None,
+                "run_dir": r.run_dir.replace("\\", "/")}
 
     if mode == "live":
         @app.post("/api/start")

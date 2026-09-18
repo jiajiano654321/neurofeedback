@@ -53,6 +53,11 @@ function connectWs() {
     render();
     if (env.msg.type === "final" || env.msg.type === "aborted") {
       wsShouldRun = false; S.terminal = true;
+      if (S.mode === "live") {
+        // 先 fetch 再关 WS：WS 连着 watcher 才不会 shutdown，
+        // GET /api/run 才拿得到 wall_elapsed_s / 产物路径。
+        fetchRunInfo().finally(() => { try { ws.close(); } catch (e) {} });
+      }
     }
   };
   ws.onclose = () => {
@@ -136,13 +141,11 @@ function applyEvent(f) {
     case "final":
       S.phase = "finished"; S.status = "ok"; S.terminal = true;
       S.blockRates = f.block_rates;
-      if (S.mode === "live") fetchRunInfo();
       break;
     case "aborted":
       S.phase = "aborted"; S.status = "aborted";
       S.reason = f.reason; S.k = f.k; S.t1 = f.t1;
       S.terminal = true;
-      if (S.mode === "live") fetchRunInfo();
       break;
   }
 }

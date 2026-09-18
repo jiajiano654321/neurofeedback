@@ -19,14 +19,20 @@ from . import webapp
 _ALL_CH = (config.TARGET.channel, *config.EOG_PROXY_CHANNELS)
 
 
-def _watch_runner_then_stop_server(server, runner) -> None:
-    """等 runner 真正 start（_t 被赋值）后再 join，结束后令 server 退出。
+def _watch_runner_then_stop_server(server, runner, app, *,
+                                   terminal_linger_sec: float = 10.0) -> None:
+    """等 runner 真正 start（_t 被赋值）后再 join，终态后等 WS 断开再关服务器。
 
     为什么要等 start：api_start 在 runner_factory 返回之后才调 runner.start()，
     而 factory 里就起了 watch 守护线程。若 watch 在 start 前调 join，
     FeedbackRunner.join 因 self._t is None 会**立即**返回 → 服务器还没开跑就被
     should_exit 关掉 → CLI 兜底把 outcome 还 None 的 runner abort 掉，
     引擎刚启动在 k=0 就落 user_abort（启动竞态，uvicorn 真实路径每次必现）。
+
+    寿命语义：引擎终态 且 无观看者 WS 连接，服务器才退出。
+    - 正常路径：前端收到 final 后主动关 WS → watcher 检测到 ws_taken=False → 退出
+    - 兜底：终态后最多再等 terminal_linger_sec（防死页面/永不关连接），
+      到时仍有 WS 连着也强退；graceful_shutdown 再兜 uvicorn 层的底。
     """
     # 轮询等 _t 被赋值（start() 才会做）；间隔 10ms，最多等 30s（极端慢启动兜底）
     started = False
@@ -39,6 +45,15 @@ def _watch_runner_then_stop_server(server, runner) -> None:
         print("[watcher] runner 在 30s 内未 start，按未启动关停服务器",
               file=sys.stderr)
     runner.join()  # 超时未 start 时 join 必立即返回，保留统一出口
+    # 引擎已终态：等 WS 断开再退出（观看者在，服务器就得在）
+    # 用真实 time.sleep（墙钟策略，不与注入的 _sleep_fn 快放时钟混用）
+    linger_deadline = time.time() + terminal_linger_sec
+    while getattr(app.state, "ws_taken", False):
+        if time.time() >= linger_deadline:
+            print(f"[watcher] 终态驻留 {terminal_linger_sec}s 上限到，"
+                  f"强制关停（WS 仍连着）", file=sys.stderr)
+            break
+        time.sleep(0.05)
     # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
     # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
     server.should_exit = True
@@ -93,7 +108,8 @@ class _FaultRunner:
 
 
 def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
-        _fault=None) -> int:
+        _fault=None, _terminal_linger_sec: float | None = None,
+        _graceful_shutdown_sec: float | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     # ---------------- replay：无引擎、无写入 ----------------
@@ -135,13 +151,21 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
             r._sleep_fn, r._clock = _sleep_fn, _clock
         registry["r"] = r
         threading.Thread(
-            target=_watch_runner_then_stop_server, args=(server, r), daemon=True,
+            target=_watch_runner_then_stop_server,
+            args=(server, r, app_state["app"]),
+            kwargs={"terminal_linger_sec": terminal_linger_sec},
+            daemon=True,
         ).start()
         return r
 
+    terminal_linger_sec = _terminal_linger_sec if _terminal_linger_sec is not None else 10.0
+    graceful_shutdown_sec = _graceful_shutdown_sec if _graceful_shutdown_sec is not None else 5.0
+    app_state: dict = {}
     app = webapp.create_app(subj=args.subj, data_root=args.data_root,
                             out_root=args.out_dir, runner_factory=runner_factory)
-    server = _make_server(app, args.port, _server_cls)
+    app_state["app"] = app
+    server = _make_server(app, args.port, _server_cls,
+                          graceful=graceful_shutdown_sec)
     print(f"[feedback-loop] http://127.0.0.1:{args.port}  "
           f"（仅本机；浏览器关闭不中止会话）")
     server.run()
@@ -164,12 +188,13 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
     return _rc(outcome["status"], outcome.get("reason"))
 
 
-def _make_server(app, port: int, server_cls):
+def _make_server(app, port: int, server_cls, *, graceful: float = 5.0):
     if server_cls is not None:
         return server_cls(app, port)
     import uvicorn
     config_uv = uvicorn.Config(app, host="127.0.0.1", port=port,
-                               log_level="warning")
+                               log_level="warning",
+                               timeout_graceful_shutdown=graceful)
     return uvicorn.Server(config_uv)
 
 

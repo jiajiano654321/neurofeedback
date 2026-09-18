@@ -374,3 +374,140 @@ def test_ws_final_then_close_does_not_hang_uvicorn_shutdown(data_root, tmp_path)
         if t.is_alive():
             server.should_exit = True
             t.join(5)
+
+
+def test_final_frame_run_json_ready_and_watcher_waits_for_ws(data_root, tmp_path):
+    """终态帧到达时 run.json 已写好（GET /api/run 能拿到 wall_elapsed_s 等），
+    且 watcher 在 WS 仍连着时不退出服务器（观看者在，不得关）。"""
+    import asyncio
+    import urllib.request
+    import websockets
+    from bci_sys.replay import feedback_cli as cli
+
+    factory, holder = _fast_runner_factory(data_root, tmp_path)
+    app = webapp.create_app(subj="001", data_root=data_root,
+                            out_root=str(tmp_path), runner_factory=factory)
+    config = uvicorn.Config(app, host="127.0.0.1", port=0,
+                             log_level="error")
+    server = uvicorn.Server(config)
+    server_t = threading.Thread(target=server.run, daemon=True)
+    server_t.start()
+    try:
+        port = _wait_server_started(server)
+
+        runner = factory(subj="001", root=data_root, out_root=str(tmp_path))
+        app.state.runner = runner
+        runner.start()
+
+        # watcher：引擎终态后等 WS 断开再关服务器（新语义）
+        watcher_t = threading.Thread(
+            target=cli._watch_runner_then_stop_server,
+            args=(server, runner, app),
+            kwargs={"terminal_linger_sec": 10.0},
+            daemon=True)
+        watcher_t.start()
+
+        async def _scenario():
+            # 连 WS，收帧到 final
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}/ws")
+            try:
+                while True:
+                    raw = await ws.recv()
+                    env = json.loads(raw)
+                    if env["msg"]["type"] == "final":
+                        break
+                # 验证 1：final 帧刚到、WS 还连着时，GET /api/run 已有完整字段
+                def _http_get():
+                    r = urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/run", timeout=5)
+                    return json.loads(r.read())
+                body = await asyncio.to_thread(_http_get)
+                assert body["status"] == "ok", f"status={body.get('status')}"
+                assert body.get("wall_elapsed_s") is not None
+                assert body.get("data_elapsed_s") == 840.0
+                assert body.get("run_dir") and "sub-001" in body["run_dir"]
+                # 验证 2：保持 WS 开 2 秒，服务器应仍 alive（WS 连着不退出）
+                await asyncio.sleep(2.0)
+                assert server_t.is_alive(), \
+                    "终态但 WS 仍连着时，watcher 不应令服务器退出"
+            finally:
+                await ws.close()
+            # 验证 3：关 WS 后，服务器在 10s 内退出
+            for _ in range(200):  # 最多等 10s
+                if not server_t.is_alive():
+                    break
+                await asyncio.sleep(0.05)
+            assert not server_t.is_alive(), \
+                "WS 关闭后 watcher 应在 10s 内令服务器退出"
+
+        asyncio.run(_scenario())
+    finally:
+        if server_t.is_alive():
+            server.should_exit = True
+            server_t.join(5)
+
+
+def test_watcher_linger_and_graceful_shutdown_when_ws_never_closes(data_root, tmp_path):
+    """WS 永不关闭（死页面/网络 RST 丢 close 帧）时，watcher 经过
+    terminal_linger_sec 强令退出，graceful_shutdown 再兜底。"""
+    import asyncio
+    import websockets
+    from bci_sys.replay import feedback_cli as cli
+
+    factory, holder = _fast_runner_factory(data_root, tmp_path)
+    app = webapp.create_app(subj="001", data_root=data_root,
+                            out_root=str(tmp_path), runner_factory=factory)
+    config = uvicorn.Config(app, host="127.0.0.1", port=0,
+                             log_level="error",
+                             timeout_graceful_shutdown=1)
+    server = uvicorn.Server(config)
+    server_t = threading.Thread(target=server.run, daemon=True)
+    server_t.start()
+    try:
+        port = _wait_server_started(server)
+
+        runner = factory(subj="001", root=data_root, out_root=str(tmp_path))
+        app.state.runner = runner
+        runner.start()
+
+        # watcher：linger=0.3s + graceful=1s → 总退出时间 < 5s（留余量）
+        watcher_t = threading.Thread(
+            target=cli._watch_runner_then_stop_server,
+            args=(server, runner, app),
+            kwargs={"terminal_linger_sec": 0.3},
+            daemon=True)
+        watcher_t.start()
+
+        async def _scenario():
+            # WS 连接收 final，但不主动关（模拟死页面）
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}/ws")
+            try:
+                while True:
+                    raw = await ws.recv()
+                    env = json.loads(raw)
+                    if env["msg"]["type"] == "final":
+                        break
+                # 收到 final 后也不关 WS，等 linger+graceful 兜底
+                t0 = time.time()
+                # 等服务器退出（最多 8s，linger 0.3 + graceful 1 + 余量）
+                for _ in range(800):  # 8s / 10ms
+                    if not server_t.is_alive():
+                        break
+                    await asyncio.sleep(0.01)
+                elapsed = time.time() - t0
+                assert not server_t.is_alive(), (
+                    f"WS 永不关闭时，服务器应在 linger+graceful+余量 内退出，"
+                    f"但 {elapsed:.1f}s 后仍 alive")
+                # 应在 ~1-2s 内退出（终态检测 + linger 0.3 + graceful 1）
+                assert elapsed < 5.0, f"退出耗时 {elapsed:.1f}s 超出预期"
+            finally:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
+        asyncio.run(_scenario())
+    finally:
+        if server_t.is_alive():
+            server.should_exit = True
+            server_t.join(5)

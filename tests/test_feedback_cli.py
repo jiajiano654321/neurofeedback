@@ -167,9 +167,11 @@ def test_watch_runner_waits_for_start_before_joining():
 
     runner = StubRunner()
     server = types.SimpleNamespace(should_exit=False)
+    # 简易 app 对象：ws_taken 默认 False，终态后无 WS 立即可退
+    app = types.SimpleNamespace(state=types.SimpleNamespace(ws_taken=False))
 
     t = threading.Thread(target=cli._watch_runner_then_stop_server,
-                         args=(server, runner), daemon=True)
+                         args=(server, runner, app), daemon=True)
     t.start()
 
     # start() 之前：watcher 必须卡在轮询，绝不置 should_exit

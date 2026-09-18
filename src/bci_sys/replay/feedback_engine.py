@@ -221,6 +221,28 @@ def run_feedback(
     def wall_elapsed() -> float:
         return clock() - wall0
 
+    def write_run_json() -> None:
+        """写 run.json（终态帧 publish 前调用，保证浏览器收到 final/aborted
+        时 GET /api/run 已能读到完整数据）。jsonl 行内容与行序不变（A4）。"""
+        wall = wall_elapsed()
+        data = {
+            "subj": subj,
+            "status": session.status,
+            "mode": "live",
+            "wall_started_iso": wall_iso,
+            "wall_elapsed_s": round(wall, 3),
+            "data_elapsed_s": round(last_t1, 3),
+            "rate_ratio": round(last_t1 / wall, 4) if wall > 0 else 1.0,
+            "n_calib_seg": n_cal_rows,
+            "n_running_seg": n_run_rows,
+            "block_rates": list(session.block_rates),
+            "git_commit": gitmeta.code_version(),
+        }
+        if session.reason is not None:
+            data["reason"] = session.reason
+        (run_dir / "run.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def wait_data(k: int) -> None:
         """数据钟 1x 节拍；rest/冻结卡的墙钟通过 pause_total 平移 deadline。"""
         target = wall0 + (k + 1) * config.SEGMENT_SEC + pause_total
@@ -465,7 +487,8 @@ def run_feedback(
                                  "n_valid": session.total.n_valid,
                                  "n_hit": session.total.n_hit,
                                  "block_rates": list(session.block_rates)})
-                    bus.publish(final_row, snap)
+                    write_run_json()  # 先写 run.json 再 publish：浏览器收 final 帧时
+                    bus.publish(final_row, snap)  # GET /api/run 已能读到完整字段
                 except _Stop:
                     pass
         except Exception as exc:  # 未预期异常：engine_error 硬停，traceback 只进终端
@@ -479,7 +502,8 @@ def run_feedback(
             snap.update({"phase": "aborted", "status": "aborted",
                          "reason": terminal_row["reason"],
                          "k": terminal_row["k"], "t1": terminal_row["t1"]})
-            bus.publish(terminal_row, snap)
+            write_run_json()  # 先写 run.json 再 publish：浏览器收 aborted 帧时
+            bus.publish(terminal_row, snap)  # GET /api/run 已能读到完整字段
 
     wall = wall_elapsed()
     run_json = {
