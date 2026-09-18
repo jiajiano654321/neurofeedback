@@ -35,6 +35,22 @@ def test_app_js_protocol_contract():
     assert "beforeunload" not in js and "onbeforeunload" not in js
 
 
+def test_app_js_final_state_refreshes_run_info_and_rerenders():
+    """终态（final/aborted）后必须重拉 /api/run 并重新渲染，
+    否则 finished 屏墙钟永远是 boot 时的旧值（—s）。"""
+    js = (WEB / "app.js").read_text("utf-8")
+    # 存在异步刷新函数，内部 fetch /api/run
+    assert "async function fetchRunInfo" in js
+    assert 'fetch("/api/run")' in js
+    # final / aborted 分支都调用它（live 模式）
+    assert "fetchRunInfo()" in js
+    # fetch 完成后必须触发 render() —— 否则 S.runInfo 更新了但 finished 屏不重画
+    # 检查 fetchRunInfo 函数体内 fetch 之后有 render() 调用
+    fn_start = js.index("async function fetchRunInfo")
+    fn_body = js[fn_start:js.index("\n}", fn_start) + 2]
+    assert "render()" in fn_body, "fetchRunInfo 完成后必须调用 render() 重绘 finished 屏"
+
+
 def test_static_served_via_app():
     with TestClient(webapp.create_app()) as c:
         assert c.get("/").headers["content-type"].startswith("text/html")

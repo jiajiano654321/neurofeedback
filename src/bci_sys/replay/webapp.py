@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import queue
 from pathlib import Path
 
 import asyncio
@@ -235,6 +236,14 @@ def create_app(
                 return
             app.state.ws_taken = True
             await ws.accept()
+
+            async def _recv_sentinel():
+                """感知客户端断开：只 receive 不处理消息（协议为服务端单向推流），
+                连接关闭时以 WebSocketDisconnect 退出，供主循环检查。"""
+                while True:
+                    await ws.receive_text()
+
+            recv_task = asyncio.create_task(_recv_sentinel())
             try:
                 runner = app.state.runner
                 if runner is not None and runner.bus.snapshot is not None:
@@ -243,17 +252,31 @@ def create_app(
                 else:
                     await ws.send_json({"seq": 0, "msg": eng.initial_snapshot()})
                 while True:
+                    if recv_task.done():
+                        # recv_task 正常退出说明客户端已断开（WebSocketDisconnect
+                        # 会被外层 except 捕获；任何其他异常也同样冒泡）
+                        recv_task.result()
+                        break
                     runner = app.state.runner  # start 可能发生在连接之后
                     if runner is None:
                         await asyncio.sleep(0.1)  # 引擎未启动：只等不占队列
                         continue
-                    # q.get 是阻塞调用，经线程池桥接（单连接，最多占一个 worker）
-                    env = await run_in_threadpool(runner.bus.q.get)
+                    # 用超时轮询代替纯阻塞 q.get：终态后队列永久为空，
+                    # 纯阻塞会钉死协程在 run_in_threadpool 的线程池 worker 里，
+                    # 导致客户端断开与 uvicorn 优雅关闭都无法推进。
+                    # 正常帧路径零额外延迟（q.get 有帧时立即返回）；
+                    # 无帧时每 0.5s 回事件循环一次，配合 recv_task 感知断开。
+                    try:
+                        env = await run_in_threadpool(
+                            lambda: runner.bus.q.get(timeout=0.5))
+                    except queue.Empty:
+                        continue
                     await ws.send_json(env)
                     # 终态帧送完后连接挂起等前端关闭；引擎线程已结束，不影响落盘
             except WebSocketDisconnect:
                 pass
             finally:
+                recv_task.cancel()
                 app.state.ws_taken = False  # 断开不中止引擎，只释放连接名额
 
     else:  # replay

@@ -148,7 +148,10 @@ function applyEvent(f) {
 }
 
 async function fetchRunInfo() {
-  try { S.runInfo = await (await fetch("/api/run")).json(); } catch (e) {}
+  try {
+    S.runInfo = await (await fetch("/api/run")).json();
+    render();  // 终态后重拉 run.json：墙钟/数据时长/产物路径要立即反映到 finished 屏
+  } catch (e) {}
 }
 
 // ---------- 渲染 ----------
