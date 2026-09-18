@@ -193,3 +193,44 @@ def test_watch_runner_waits_for_start_before_joining():
     assert server.should_exit is True, "watcher 结束后未置 should_exit"
     t.join(timeout=1)
     assert not t.is_alive()
+
+
+def test_runner_factory_wiring_passes_app_and_linger_to_watcher(tmp_path):
+    """生产接线锁：POST /api/start 触发 runner_factory 时，
+    factory 闭包必须把 app（state.app）与 terminal_linger_sec 传给
+    _watch_runner_then_stop_server，不能漏传或传错。
+    用 monkeypatch 截获 watcher 调用参数，不真跑引擎。"""
+    import types
+
+    captured = {}
+    orig_watch = cli._watch_runner_then_stop_server
+
+    def fake_watch(server, runner, app, *, terminal_linger_sec=10.0):
+        captured["server"] = server
+        captured["runner"] = runner
+        captured["app"] = app
+        captured["terminal_linger_sec"] = terminal_linger_sec
+        # 不真等，直接置位（模拟引擎立刻结束且无 WS）
+        server.should_exit = True
+
+    cli._watch_runner_then_stop_server = fake_watch
+    try:
+        rc = cli.run(
+            ["--subj", "001", "--out-dir", str(tmp_path)],
+            _server_cls=_Server,
+            _fault="engine_error",
+            _terminal_linger_sec=7.5,
+        )
+    finally:
+        cli._watch_runner_then_stop_server = orig_watch
+
+    # 验证：watcher 被调用了
+    assert "app" in captured, "runner_factory 未调用 _watch_runner_then_stop_server"
+    # 验证：传的 app 就是 create_app 返回的那个（state 上有 runner）
+    assert captured["app"] is not None
+    assert hasattr(captured["app"], "state")
+    # 验证：terminal_linger_sec 注入值被正确透传（不是默认 10.0）
+    assert captured["terminal_linger_sec"] == 7.5, (
+        f"_terminal_linger_sec 注入未透传，实际值 {captured['terminal_linger_sec']}")
+    # rc 仍正确（engine_error → 1）
+    assert rc == 1

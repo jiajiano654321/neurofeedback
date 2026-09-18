@@ -505,24 +505,6 @@ def run_feedback(
             write_run_json()  # 先写 run.json 再 publish：浏览器收 aborted 帧时
             bus.publish(terminal_row, snap)  # GET /api/run 已能读到完整字段
 
-    wall = wall_elapsed()
-    run_json = {
-        "subj": subj,
-        "status": session.status,
-        "mode": "live",
-        "wall_started_iso": wall_iso,
-        "wall_elapsed_s": round(wall, 3),
-        "data_elapsed_s": round(last_t1, 3),
-        "rate_ratio": round(last_t1 / wall, 4) if wall > 0 else 1.0,
-        "n_calib_seg": n_cal_rows,
-        "n_running_seg": n_run_rows,
-        "block_rates": list(session.block_rates),
-        "git_commit": gitmeta.code_version(),
-    }
-    if session.reason is not None:
-        run_json["reason"] = session.reason
-    (run_dir / "run.json").write_text(
-        json.dumps(run_json, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"status": session.status, "reason": session.reason, "run_dir": str(run_dir)}
 
 

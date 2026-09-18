@@ -198,7 +198,9 @@ def create_app(
         run_json_path = Path(r.run_dir) / "run.json"
         try:
             extra = json.loads(run_json_path.read_text("utf-8"))
-        except OSError:
+        except (OSError, json.JSONDecodeError):
+            # OSError：文件尚不存在/权限等；JSONDecodeError：Windows write_text 非原子
+            # （先截断再写），终态瞬间 GET 最密集时可能读到半截 JSON，不得 500。
             extra = {}
         if extra:
             # run.json 已落盘（终态帧 publish 前写入），直接以文件为准

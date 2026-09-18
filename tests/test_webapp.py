@@ -384,7 +384,7 @@ def test_final_frame_run_json_ready_and_watcher_waits_for_ws(data_root, tmp_path
     import websockets
     from bci_sys.replay import feedback_cli as cli
 
-    factory, holder = _fast_runner_factory(data_root, tmp_path)
+    factory, _ = _fast_runner_factory(data_root, tmp_path)
     app = webapp.create_app(subj="001", data_root=data_root,
                             out_root=str(tmp_path), runner_factory=factory)
     config = uvicorn.Config(app, host="127.0.0.1", port=0,
@@ -454,7 +454,7 @@ def test_watcher_linger_and_graceful_shutdown_when_ws_never_closes(data_root, tm
     import websockets
     from bci_sys.replay import feedback_cli as cli
 
-    factory, holder = _fast_runner_factory(data_root, tmp_path)
+    factory, _ = _fast_runner_factory(data_root, tmp_path)
     app = webapp.create_app(subj="001", data_root=data_root,
                             out_root=str(tmp_path), runner_factory=factory)
     config = uvicorn.Config(app, host="127.0.0.1", port=0,

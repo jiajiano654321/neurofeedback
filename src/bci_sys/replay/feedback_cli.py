@@ -42,18 +42,22 @@ def _watch_runner_then_stop_server(server, runner, app, *,
             break
         time.sleep(0.01)
     if not started:
+        # 30s 未等到 start：语义是未启动关停，join 立即返回后直接 should_exit，
+        # 不进 linger 等待循环（没启动就没有「观看者在服务器就得在」这回事）。
         print("[watcher] runner 在 30s 内未 start，按未启动关停服务器",
               file=sys.stderr)
-    runner.join()  # 超时未 start 时 join 必立即返回，保留统一出口
-    # 引擎已终态：等 WS 断开再退出（观看者在，服务器就得在）
-    # 用真实 time.sleep（墙钟策略，不与注入的 _sleep_fn 快放时钟混用）
-    linger_deadline = time.time() + terminal_linger_sec
-    while getattr(app.state, "ws_taken", False):
-        if time.time() >= linger_deadline:
-            print(f"[watcher] 终态驻留 {terminal_linger_sec}s 上限到，"
-                  f"强制关停（WS 仍连着）", file=sys.stderr)
-            break
-        time.sleep(0.05)
+        runner.join()  # _t is None 时立即返回，保留统一出口
+    else:
+        runner.join()
+        # 引擎已终态：等 WS 断开再退出（观看者在，服务器就得在）
+        # 用真实 time.sleep（墙钟策略，不与注入的 _sleep_fn 快放时钟混用）
+        linger_deadline = time.time() + terminal_linger_sec
+        while getattr(app.state, "ws_taken", False):
+            if time.time() >= linger_deadline:
+                print(f"[watcher] 终态驻留 {terminal_linger_sec}s 上限到，"
+                      f"强制关停（WS 仍连着）", file=sys.stderr)
+                break
+            time.sleep(0.05)
     # uvicorn.Server.should_exit 是公开文档化的退出信号（serve 循环每轮检查），
     # 置位即令主线程 server.run() 返回；本线程只发信号，不碰引擎落盘
     server.should_exit = True
@@ -124,7 +128,8 @@ def run(argv=None, *, _server_cls=None, _sleep_fn=None, _clock=None,
             print(f"PREFLIGHT FAIL: replay 文件不可用：{e}", file=sys.stderr)
             return 2
         app = webapp.create_app(mode="replay", replay_file=p)
-        server = _make_server(app, args.port, _server_cls)
+        graceful_shutdown_sec = _graceful_shutdown_sec if _graceful_shutdown_sec is not None else 5.0
+        server = _make_server(app, args.port, _server_cls, graceful=graceful_shutdown_sec)
         print(f"[feedback-loop] replay（只读） http://127.0.0.1:{args.port}  {p}")
         server.run()
         return 0  # 回放查看器退出一律 0（没有可中止的会话）
