@@ -9,11 +9,11 @@
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import queue
 from pathlib import Path
-
-import asyncio
 
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -26,6 +26,10 @@ _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 _CARD_MS = int(config.FEEDBACK_FREEZE_CARD_SEC * 1000)
 _REST_MS = int(config.FEEDBACK_REST_SEC * 1000)
+_WS_QUEUE_POLL_SEC = 0.5
+# WS 桥接队列轮询间隔：有帧时 q.get 立即返回（零额外延迟），空队列时每
+# _WS_QUEUE_POLL_SEC 回事件循环一次，使客户端断开与 uvicorn 优雅关闭
+# 都能被感知；空转 CPU 开销可忽略，断连感知延迟上限即该值。
 
 
 # ---------------- replay：jsonl → 同协议帧 + 墙钟偏移（只算不落盘） ----------------
@@ -265,10 +269,11 @@ def create_app(
                     # 纯阻塞会钉死协程在 run_in_threadpool 的线程池 worker 里，
                     # 导致客户端断开与 uvicorn 优雅关闭都无法推进。
                     # 正常帧路径零额外延迟（q.get 有帧时立即返回）；
-                    # 无帧时每 0.5s 回事件循环一次，配合 recv_task 感知断开。
+                    # 无帧时每 _WS_QUEUE_POLL_SEC 回事件循环一次，配合 recv_task 感知断开。
+                    # queue.Empty 经 run_in_threadpool 从 worker 线程原样回传。
                     try:
                         env = await run_in_threadpool(
-                            lambda: runner.bus.q.get(timeout=0.5))
+                            lambda: runner.bus.q.get(timeout=_WS_QUEUE_POLL_SEC))
                     except queue.Empty:
                         continue
                     await ws.send_json(env)
@@ -277,6 +282,8 @@ def create_app(
                 pass
             finally:
                 recv_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await recv_task
                 app.state.ws_taken = False  # 断开不中止引擎，只释放连接名额
 
     else:  # replay

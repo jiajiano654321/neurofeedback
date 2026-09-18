@@ -298,6 +298,8 @@ def test_reducer_counts_only_valid_finite_segments_like_engine():
 # ---------- 真服务器集成测试：WS 终态后阻塞 q.get 钉死 uvicorn 优雅关闭 ----------
 
 class _FakeClock:
+    """快放时钟：_clock 供墙钟读数、_sleep_fn 立即推进时钟，
+    两者配合实现零墙钟等待的快放测试。"""
     def __init__(self): self.t = 0.0
     def now(self): return self.t
     def sleep(self, dt): self.t += dt
@@ -319,31 +321,15 @@ def _fast_runner_factory(data_root, tmp_path):
     return factory, runner_holder
 
 
-_TEST_PORT_BASE = 18765
-_test_port_lock = threading.Lock()
-_test_port_next = _TEST_PORT_BASE
-
-
-def _pick_port() -> int:
-    """分配一个空闲测试端口（简单递增，避免碰撞）。"""
-    global _test_port_next
-    with _test_port_lock:
-        port = _test_port_next
-        _test_port_next += 1
-        return port
-
-
-def _wait_for_server(port: int, timeout: float = 5.0):
-    """轮询直到端口可连接。"""
-    import socket
+def _wait_server_started(server: uvicorn.Server, timeout: float = 5.0) -> int:
+    """等 uvicorn 启动完成，返回实际监听端口（port=0 时由 OS 分配）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return
-        except OSError:
-            time.sleep(0.05)
-    raise RuntimeError(f"server 未在 {timeout}s 内绑定端口 {port}")
+        if server.started and server.servers:
+            sock = server.servers[0].sockets[0]
+            return sock.getsockname()[1]
+        time.sleep(0.05)
+    raise RuntimeError("uvicorn 未在超时内进入 started 状态")
 
 
 def test_ws_final_then_close_does_not_hang_uvicorn_shutdown(data_root, tmp_path):
@@ -356,14 +342,13 @@ def test_ws_final_then_close_does_not_hang_uvicorn_shutdown(data_root, tmp_path)
     factory, holder = _fast_runner_factory(data_root, tmp_path)
     app = webapp.create_app(subj="001", data_root=data_root,
                             out_root=str(tmp_path), runner_factory=factory)
-    port = _pick_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port,
+    config = uvicorn.Config(app, host="127.0.0.1", port=0,
                              log_level="error")
     server = uvicorn.Server(config)
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
     try:
-        _wait_for_server(port)
+        port = _wait_server_started(server)
         # 启动引擎
         import urllib.request
         req = urllib.request.Request(
