@@ -64,6 +64,7 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "pytest" },
+    { name = "websockets" },
     { name = "wsproto" },
 ]
 
@@ -82,6 +83,7 @@ requires-dist = [
 dev = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest" },
+    { name = "websockets", specifier = ">=12" },
     { name = "wsproto", specifier = ">=1.2" },
 ]
 
