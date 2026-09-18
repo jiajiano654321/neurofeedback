@@ -1,7 +1,8 @@
-# IT1 + IT2 + IT3 验收证据
+# IT1 + IT2 + IT3 + IT4 验收证据
 
 - IT1/IT2：日期 2026-09-09 ｜ 代码版本（git）：`7d4751c`
 - IT3：日期 2026-09-10 ｜ 分支 `feature/it3-qc-monitor`（测试 92 passed，0 skip）
+- IT4：日期 2026-09-17/18 ｜ 分支 `feature/it4-feedback-loop`（测试 **164 passed**，0 skip，boundary 3；走查时代码 `6b1ed93`）
 
 本阶段目标是**端到端跑通管线**（公开数据 1x 回放 + 离线 theta + 实时三级 QC），**不评估疗效**。所有有效率/系数均为公开数据上的结果留痕，不是疗效结论。
 
@@ -94,6 +95,87 @@ cmp qc.jsonl qc.jsonl   → IDENTICAL
 ```
 
 sha256 两次均为 `1029a0680cdae99bdad026a4dfc4b40e699bbe1dfb34ea841aa21c95bd942470`。qc.jsonl 锁 LF、无墙钟量；墙钟只在 run.json；非有限 p2p 落 null 不产生裸 `NaN` token。
+
+## IT4：feedback-loop（S3 冻结 → 八相位 Web 反馈，1x 回放）
+
+**边界声明**：原型阶段，仅回放公共数据 ds007169 sub-001；**无硬件接入、无实时采集**；
+走查被试为开发者本人；下列率值/系数全是公开数据上的**描述性结果，不是疗效结论**。
+S5 任务协议、六件套、ABABA 等留 IT5–IT7。
+
+命令（终端只打印 URL，不自动开浏览器）：
+
+```bash
+uv run feedback-loop --subj 001                     # live：http://127.0.0.1:8000
+uv run feedback-loop --replay outputs/feedback/sub-001/<run_id>   # 只读回放，不落盘
+```
+
+### 快放验收数值表（注入时钟双跑，单位 µV/µV²，不 ×1e6）
+
+| 项 | 实测值 |
+|---|---|
+| EOG 冻结系数 | b_FP1=0.24818284，b_FP2=0.37812954 |
+| θ 阈值（S3 P20，n=496 有效段） | 16.770595 µV²；实测校准达标率 0.8004 |
+| 六块达标率 | 0.752244 / 0.872987 / 0.799263 / 0.831758 / 0.809709 / 0.882114（即 75.2/87.3/79.9/83.2/81.0/88.2%） |
+| 无效段（QC-only，锁死值） | 43 / 41 / 57 / 71 / 85 / 108（合计 405） |
+| 有效段 | 557 / 559 / 543 / 529 / 515 / 492（合计 3195；3195+405=3600，每块 600 段） |
+| 时长 | 数据 840.0 s（600 校准段 + 3600 运行段）｜快放墙钟 993.0 s（5×30s rest 数据钟暂停、墙钟照走），rate_ratio 0.8459 |
+| jsonl 规模 | **1,024,560 字节 / 4225 行**：meta 1 / phase 16 / calib_seg 600 / freeze 1 / seg 3600 / block_summary 6 / final 1 |
+
+### A4 字节级确定性（sha256 链）
+
+同代码版本双跑（不同墙钟、独立目录 run_id=fixed）整文件 sha256 相等。随提交推进的链：
+
+| 代码版本 | meta.git_commit | feedback.jsonl sha256 |
+|---|---|---|
+| 9726c48（T9 锁定） | 9726c48-dirty | `10e6ac5df73a…b07bcb` |
+| 7052b70 | 7052b70-dirty | `5ee8086c…ffaa9d` |
+| 35b8e63（当前） | 35b8e63-dirty | `43a1925319411cdb6e27354e293083a6e5d7b636951fbe98cd5cf0d5e10952f0` |
+
+跨提交整文件 sha 必变，**唯一差异是 meta 行的设计字段 `git_commit`**（记录产出版本，
+沿 IT1「墙钟/版本只进 meta/run.json、不进数据行」的决策）；去掉 meta 行
+（`tail -n +2`）后 4224 个数据行在三个版本间 `cmp` **逐字节相同**。A4 契约本身是
+同版本双跑字节一致，当前版本双跑相等已复验。
+
+### 真墙钟无头走查（2026-09-18 04:07–04:26，三会话全过）
+
+方法：playwright-core 驱动系统 **无头 Edge 153** 自动点击/截图，Node spawn 真生产入口
+`.venv python -m bci_sys.replay.feedback_cli`（detached/windowsHide），真墙钟、真 HTTP/WS、
+真页面；脚本 `e:/tmp/it4_pw/walk.mjs` 不进仓库。**下列截图均为该自动走查产物，非人工摆拍。**
+
+- **session A**（live 全程，run `20260918-120725`，04:07:21→04:23:59，约 16.6 分钟）：
+  八相位与关页/重连全部符合；block 中关标签页 15 s，jsonl 625→700 行继续增长
+  （关页不中止），重开页面经 snapshot 追平（剩余 01:56→01:39）。结束屏显示
+  数据 840 s / **墙钟 993.0 s**、产物目录、六率+无效段表；浏览器收到 final 帧后
+  **服务器秒退 rc=0**。run.json：`status=ok, wall_elapsed_s=993.001, data_elapsed_s=840,
+  rate_ratio=0.8459, n_calib_seg=600, n_running_seg=3600, block_rates` 齐。
+- **session B**（block 中中止，run `20260918-122404`）：block 1（k=700，t1=140.2 s）点
+  「中止会话」→ 进程退出码 **130**；run.json `status=aborted, reason=user_abort`
+  （wall 143.201 s / data 140.2 s / n_running_seg=101）；feedback.jsonl + run.json 均保留不删除（D3）。
+- **session C**（--replay runA，只读）：金色徽标「回放模式（只读，不落盘）」+ 控制条可见；
+  seek 吸附三相位（120000 ms→冻结卡、250000 ms→rest、200000 ms→block，02:03/16:33）；
+  播放按钮 ⏸ 暂停 ↔ ▶ 继续切换正确；**replay 前后 outputs/ 目录零差异**。
+
+### run.json 字段
+
+`subj / status / mode / wall_started_iso / wall_elapsed_s / data_elapsed_s / rate_ratio /
+n_calib_seg / n_running_seg / block_rates / git_commit`，aborted 另加 `reason`。
+**写入时机契约**：终态时 run.json 在 publish final/aborted WebSocket 帧**之前**落盘，
+浏览器收到终态帧再 GET /api/run 必读到完整文件（终态帧与 HTTP 刷新存在竞争，见计划 T9 记录）。
+
+### 截图（`evidence/it4/`，10 张）
+
+| 文件 | 相位/核对点 |
+|---|---|
+| `01-confirm.png` | 确认页参数齐（up / 6×120s / rest 30s / W=5 / P20 / QC L1>100µV、L3>200µV / 墙钟上限 1500s）；未开始不推进 |
+| `02-calibration.png` | S3 校准灰格推进、mm:ss 计时、无 θ 表/进度条 |
+| `03-freeze.png` | t=120s 冻结卡：b=0.2482/0.3781、θ_thr=16.77 µV²、n=496、校准率 80.0%、direction=up |
+| `04-block-valid.png` | BLOCK 1/6：六圆点、剩余时间、QC 绿 chip、达标条+80% 刻线、θ 平滑功率+黄阈值刻线 |
+| `05-block-invalid.png` | 斜纹冻结、红 chip「✕ 无效段·反馈暂停（L3）」+红横幅、分子分母定格 15/19、不计入达标率 |
+| `06-rest.png` | 块间 30s 倒计时、数据钟暂停、上一块率 75.2% 仅记录（阈值不变） |
+| `07-finished.png` | 结束屏：数据 840s/墙钟 993.0s、产物目录、六率与无效段表（同锁死值）、非疗效声明 |
+| `08-aborted.png` | 中止屏：user_abort、定格 k=700/t1=140.2s、aborted 不删除（D3） |
+| `09-replay.png` | 回放模式：金徽标（只读不落盘）+ 控制条 + seek 吸附 BLOCK 相位、与 live 同构渲染 |
+| `10-reconnect.png` | block 中关页后重连，snapshot 追平，会话继续（剩余时间已推进） |
 
 ## 经验性发现（实测，非文档反推）
 
