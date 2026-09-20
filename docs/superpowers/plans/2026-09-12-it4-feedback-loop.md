@@ -4288,4 +4288,69 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 >   - 截图来源声明：10 张全部由 playwright-core 驱动系统无头 Edge 153 自动点击/截图
 >     生成（真页面真墙钟，非人工摆拍、非伪造）；脚本 e:/tmp/it4_pw/walk.mjs 不进仓库。
 
+> **执行记录（2026-09-20，整支分支最终审查：第四轮终审，0B/2I → 76832b5 修复 → 复审 APPROVED，164→168）**：
+>
+> - 全部 T0–T9 完成后对 main..HEAD（当时 37 个提交）做整支分支最终审查（规格符合性逐条
+>   + 合规 + 全量实测）。首轮结论 **CHANGES REQUESTED：0 Critical / 2 Important / 8 Minor**。
+> - **I-1（snapshot 追平后转发陈旧帧 + 锁外撕裂读）**：ws_bridge 先取 bus.snapshot 推给
+>   新连接，随后无过滤地桥接队列积压——而 EventBus 满 256 帧丢最旧，晚开页面（引擎已发
+>   300 帧）收到 snapshot seq=300 后，转发首帧竟是 seq=45，前端断档判定
+>   `env.seq !== lastSeq+1` 必然成立；且 bus.seq 与 bus.snapshot 为两次无锁读，publish
+>   期间存在撕裂窗口。审查员探针 e:/tmp/it4_probe_stale.py（真 TestClient，不入库）实测
+>   首帧 45 vs 期望 301。控制器核对后修正影响量级：陈旧帧经 q.get() 无等待路径毫秒级排空
+>   （非"51s 排空、进度条长期不动"），真实影响是**每次新连接首轮必触发一次额外 ~300ms
+>   重连**——招牌"snapshot 一次追平"从未首轮成功；晚开页面还会短暂显示过期 snapshot。
+>   无永久卡死、无数据丢失、jsonl 不受影响。
+> - **I-2（拒绝码 429 非法 + 前端重连风暴）**：第二观看者拒绝路径 `ws.close(code=429)`
+>   的 429 是 HTTP 码、非 RFC 6455 合法 close code，真 websockets 栈抛
+>   ProtocolError（表现 1006）并在服务端制造 traceback 洪泛；前端 onclose 不区分关闭码
+>   一律 scheduleReconnect（300ms 去重），被拒标签页每 300ms 重连一次。前端代码本身无
+>   ws.close(429)（后端唯一一处）。
+> - 修复 **76832b5**（6 files +152/-11；publish/jsonl/引擎主循环/CLI 零改动）：
+>   ① EventBus 新增 `snapshot_pair() -> tuple[int, dict|None]`，锁内一致返回 (seq, snapshot)，
+>   消除撕裂窗口；② ws_bridge 用 snapshot_pair 取追平点，转发循环对
+>   `env["seq"] <= last_seq` 的积压帧一律 `continue`（满队列丢最旧只改变积压量、不破坏
+>   seq 单调，合法新帧必然 > last_seq；慢消费者造成的真实断档仍照常触发重连追平，设计
+>   行为不被掩盖）；③ 拒绝码改 **1013 Try Again Later**（RFC 6455 §7.4.2 注册码），拒绝
+>   分支仍在占槽前 return；④ 前端 onclose 识别 1013：wsShouldRun=false、清重连定时器、
+>   显示 #ws-dup-banner 横幅（默认 hidden，文案告知关掉另一标签页后刷新），其他关闭码
+>   仍走唯一重连入口。
+> - TDD 红相（修复前实测）：`AttributeError: 'EventBus' object has no attribute
+>   'snapshot_pair'`；积压回归 `assert 45 == 301`；拒绝码 `assert 1013 == 429`；
+>   前端两契约测试无 (ev)/1013 分支、index.html 无 ws-dup-banner。
+> - 新增 4 个测试（164→**168**）：test_eventbus_snapshot_pair_is_consistent_under_lock；
+>   test_ws_snapshot_then_stale_backlog_is_dropped（_ManualRunner 手发帧，无 sleep/无脚本
+>   线程，断言 qsize==256/dropped==44、snapshot seq==300、转发首帧 seq==301 且 k==900）；
+>   原 429 用例改名 ..._1013 并追加"ws1 拒绝后仍正常收流"；前端
+>   test_app_js_onclose_1013_branch_stops_reconnect_and_shows_banner 与
+>   test_index_contains_duplicate_viewer_banner_hidden_by_default。
+> - 复审 **APPROVED**（独立实测，非转述）：新探针 it4_probe_stale2.py 按修复后契约
+>   实测 snapshot 300、积压 256 帧排空后零转发、首帧 seq=301/k=900 PASS；真 uvicorn +
+>   真 websockets 复验第二连接收 1013、stderr 再无 ProtocolError traceback、ws1 保持
+>   OPEN、服务器干净退出；168 passed/0 skip、boundary 3、node --check OK。
+> - A4 在 HEAD=76832b5 复验：双跑 feedback.jsonl 各 **1,024,560 字节 / 4225 行**，
+>   去 meta 行 4224 数据行 cmp 逐字节相同，双跑整文件 sha256 相等（前缀 **44b5b554**；
+>   meta 行 git_commit=76832b5-dirty，随提交变，数据行不变）；b=0.2481828388/
+>   0.3781295414、θ_thr=16.77059514、六率与 invalid/valid 计数同锁死值。
+> - 8 条 Minor 处置：第 6 条（第二标签页无用户提示）已随 I-2 关闭；其余 7 条留 backlog
+>   不阻塞本迭代——① run.json write_text 非原子（建议 tmp+os.replace；读侧已兜底
+>   OSError/JSONDecodeError）；② snapshot 不恢复 calK 圆点/rest 倒计时（纯展示）；
+>   ③ reduce_snapshot/boundary_before 为测试专用生产代码（可移测试 helper）；
+>   ④ replay 白名单 symlink 边角（仅误拒方向）；⑤ uvicorn 启动前 Ctrl-C 毫秒窗 rc=1
+>   而非 130；⑦ XSS 面记录为可忽略；⑧ 两条 Starlette/httpx DeprecationWarning 环境噪音。
+> - trailer 历史违规最终决策：深埋的 0a3c3f8/c56de9a/7052b70 三提交误署
+>   `Co-Authored-By: Claude Sonnet 5`，**不 rebase 改写**（其后 34 个 sha 全变会破坏本
+>   计划与 evidence 中的 sha 证据链），在 PR 描述中说明；更早 7a635dc 等及 17 个裸
+>   "Claude" 提交发生在署名规则（2026-09-17）之前，维持 §0 豁免。bea44d8 已就近
+>   amend 为 6b1ed93（代码字节不变）。
+> - 修复后 walk 回归（**2026-09-20 08:55–09:14，无头 Edge 三会话，进程 exit 0**，
+>   验证 I-1 重连追平路径与 I-2 同文件改动无回归；10 张截图全部重拍入库）：
+>   session A（run 20260920-085536）01–07、10 全对：关页 15s jsonl 624→700 行继续增长、
+>   重连 snapshot 追平剩余 01:56→01:39（10-reconnect.png 绿点在线）、rest 上一块 75.2%、
+>   finished 数据 840s/墙钟 993.0s、六率 75.2/87.3/79.9/83.2/81.0/88.2%、rc=0，
+>   run.json git_commit=**76832b5-dirty** 证实跑在修复后代码；
+>   session B（run 20260920-091213）k=700/t1=140.2s 中止 rc=130、aborted/user_abort、
+>   产物保留；session C replay 徽标/控制条、seek 三吸附、⏸↔▶、outputs 零差异。
+>   全部锁死值（b/θ_thr/rates/invalid/valid/840/993.0/0.8459）逐项不变。
+
 <!-- APPEND-MARKER -->

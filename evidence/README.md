@@ -2,7 +2,7 @@
 
 - IT1/IT2：日期 2026-09-09 ｜ 代码版本（git）：`7d4751c`
 - IT3：日期 2026-09-10 ｜ 分支 `feature/it3-qc-monitor`（测试 92 passed，0 skip）
-- IT4：日期 2026-09-17/18 ｜ 分支 `feature/it4-feedback-loop`（测试 **164 passed**，0 skip，boundary 3；走查时代码 `6b1ed93`）
+- IT4：日期 2026-09-17/18，终审修复与回归 2026-09-20 ｜ 分支 `feature/it4-feedback-loop`（测试 **168 passed**，0 skip，boundary 3；最终代码 `76832b5`）
 
 本阶段目标是**端到端跑通管线**（公开数据 1x 回放 + 离线 theta + 实时三级 QC），**不评估疗效**。所有有效率/系数均为公开数据上的结果留痕，不是疗效结论。
 
@@ -129,12 +129,15 @@ uv run feedback-loop --replay outputs/feedback/sub-001/<run_id>   # 只读回放
 |---|---|---|
 | 9726c48（T9 锁定） | 9726c48-dirty | `10e6ac5df73a…b07bcb` |
 | 7052b70 | 7052b70-dirty | `5ee8086c…ffaa9d` |
-| 35b8e63（当前） | 35b8e63-dirty | `43a1925319411cdb6e27354e293083a6e5d7b636951fbe98cd5cf0d5e10952f0` |
+| 35b8e63 | 35b8e63-dirty | `43a1925319411cdb6e27354e293083a6e5d7b636951fbe98cd5cf0d5e10952f0` |
+| 5ef8e1f | 5ef8e1f-dirty | `5c59c6014939c6c0f07ce7864d4c03e2e1c17eb765622d9bac4803b7bb6c0c55` |
+| 76832b5（当前） | 76832b5-dirty | `44b5b5544a22ef84c24dc2cda9f7d5ed3f6d506bbb1339c1961fda757ecef096` |
 
 跨提交整文件 sha 必变，**唯一差异是 meta 行的设计字段 `git_commit`**（记录产出版本，
 沿 IT1「墙钟/版本只进 meta/run.json、不进数据行」的决策）；去掉 meta 行
-（`tail -n +2`）后 4224 个数据行在三个版本间 `cmp` **逐字节相同**。A4 契约本身是
-同版本双跑字节一致，当前版本双跑相等已复验。
+（`tail -n +2`）后 4224 个数据行在五个版本间 `cmp` **逐字节相同**。A4 契约本身是
+同版本双跑字节一致，当前版本（76832b5）双跑各 1,024,560 字节/4225 行、sha 相等，
+由最终审查员与控制器分别独立复验。
 
 ### 真墙钟无头走查（2026-09-18 04:07–04:26，三会话全过）
 
@@ -154,6 +157,29 @@ uv run feedback-loop --replay outputs/feedback/sub-001/<run_id>   # 只读回放
 - **session C**（--replay runA，只读）：金色徽标「回放模式（只读，不落盘）」+ 控制条可见；
   seek 吸附三相位（120000 ms→冻结卡、250000 ms→rest、200000 ms→block，02:03/16:33）；
   播放按钮 ⏸ 暂停 ↔ ▶ 继续切换正确；**replay 前后 outputs/ 目录零差异**。
+
+### 终审修复（76832b5）与回归走查（2026-09-20）
+
+整支分支最终审查发现 2 个 Important，修复提交 `76832b5`（164→**168 passed**）后复审
+APPROVED，并以同一脚本重跑三会话无头走查（08:55–09:14，进程 exit 0；**10 张截图全部
+重拍**，run.json 中 git_commit=76832b5-dirty 证实跑在修复后代码）：
+
+- **I-1 陈旧帧/撕裂读**：新连接收 snapshot 后，桥接循环现丢弃 `seq <= 追平点` 的队列
+  积压帧，且追平点经锁内 `snapshot_pair()` 一致读取（修复前晚开页面首帧收到 seq=45 vs
+  snapshot seq=300，必触发一次多余重连）。回归实证：session A 关页 15s jsonl
+  624→700 行继续增长，重连后 snapshot 一次追平（剩余 01:56→01:39，`10-reconnect.png`
+  绿点在线），无断档重连。
+- **I-2 拒绝码 429→1013**：第二观看者的 WebSocket 拒绝码由非法的 HTTP 码 429（真
+  websockets 栈抛 ProtocolError、服务端 traceback 洪泛）改为 RFC 6455 注册码
+  **1013 Try Again Later**；被拒标签页停止 300ms 重连风暴并显示红色横幅
+  （#ws-dup-banner，告知关闭另一标签页后刷新）。真栈复验：第二连接收 1013、stderr
+  无 traceback、第一连接不受影响。走查三会话为单标签页场景，不触发该路径（由集成测试
+  与真栈探针覆盖）。
+- session A run `20260920-085536`：01–07、10 全部符合，数据 840s/墙钟 993.0s、
+  六率 75.2/87.3/79.9/83.2/81.0/88.2%、无效段 43/41/57/71/85/108、rc=0；
+  session B run `20260920-091213`：k=700/t1=140.2s 中止 rc=130、aborted/user_abort、
+  产物保留；session C：徽标/控制条、seek 三吸附（02:03/16:33）、⏸↔▶、零写入。
+  全部锁死值与 09-18 走查逐项一致。
 
 ### run.json 字段
 
