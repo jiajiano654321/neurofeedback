@@ -15,6 +15,14 @@ from . import theta
 
 
 def median_by_load(df: pd.DataFrame) -> dict[int, float]:
+    """按 n-back 负荷分组，返回每档负荷对应的 theta 功率中位数。
+
+    Args:
+        df: 需包含 `load`（n-back 档位）与 `theta_uV2`（theta 频段功率）两列的 DataFrame。
+
+    Returns:
+        字典，键为负荷档位（int），值为该档位下 theta_uV2 的中位数（float）。
+    """
     return {int(k): float(v) for k, v in df.groupby("load")["theta_uV2"].median().items()}
 
 

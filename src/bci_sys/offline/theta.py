@@ -42,17 +42,31 @@ def theta_power_uV2(
     band: tuple[float, float] = config.THETA_BAND_HZ,
     nw: float = config.MULTITAPER_NW,
 ) -> np.ndarray:
-    """每 epoch 的 theta(4-8Hz) 功率，单位 µV²（输入 µV）。multitaper，NW=2。"""
+    """每 epoch 的 theta(4-8Hz) 功率，单位 µV²（输入 µV）。multitaper，NW=2。
+
+    参数：
+        epochs: 已滤波并切好的 epoch，形状 (n_epochs, n_times)；一维输入会补成 (1, n_times)。
+        sfreq:  采样率 Hz。
+        band:   积分频带 (fmin, fmax)，默认 theta 4-8Hz。
+        nw:     multitaper 的时间-带宽积 NW，控制谱平滑程度（越大越平滑、分辨率越低）。
+
+    返回：
+        形状 (n_epochs,) 的功率数组，单位 µV²（输入若为 µV，PSD 为 µV²/Hz，对频率积分后得 µV²）。
+    """
     from mne.time_frequency import psd_array_multitaper
 
+    # 统一成二维 (n_epochs, n_times)，兼容单个 epoch 的一维输入
     epochs = np.atleast_2d(epochs)
+    # 单个 epoch 的时长 T（秒），用于把 NW 换算成 mne 需要的 bandwidth
     t_epoch = epochs.shape[1] / sfreq
     # mne 没有 NW 参数，要的是 bandwidth（全带宽，Hz）。
     # mne 内部：half_nbw(NW) = bandwidth * n_times / (2*sfreq) = bandwidth*T/2
     # → bandwidth = 2*NW/T。NW=2、T=1.5s → bandwidth = 2.667 Hz（不是 NW/T=1.333）。
     bandwidth = 2.0 * nw / t_epoch
+    # normalization="full" 保证 PSD 绝对量纲正确（µV²/Hz），否则功率会差一个常数因子
     psd, freqs = psd_array_multitaper(
         epochs, sfreq, fmin=band[0], fmax=band[1],
         bandwidth=bandwidth, normalization="full", verbose="ERROR",
     )
+    # 沿频率轴梯形积分：µV²/Hz × Hz = µV²
     return np.trapezoid(psd, freqs, axis=1)
